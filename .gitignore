@@ -1,0 +1,13 @@
+# Secrets
+.env
+*.env
+
+# Student data: never stored in this repository
+data/private/
+data/raw_scans/
+consent/
+data/**/*.pdf
+
+# Python
+__pycache__/
+.venv/

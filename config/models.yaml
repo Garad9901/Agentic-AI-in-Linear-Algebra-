@@ -1,0 +1,18 @@
+# LLM selection, see section 5 of docs/PREREGISTRATION.md.
+# Two instruction-tuned models from two different families, each on a free API
+# tier on the run-freeze date and released after 2025-04-24.
+# Fill in and commit with tag models-v1 before the first test-split run.
+
+models:
+  - provider:
+    model_id:
+    family:
+    release_date:
+    access_date:
+    temperature: 0.7
+  - provider:
+    model_id:
+    family:
+    release_date:
+    access_date:
+    temperature: 0.7
