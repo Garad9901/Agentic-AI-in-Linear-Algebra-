@@ -5,3 +5,5 @@ This repository holds the conference version of the project. It covers an error 
 The analysis plan was frozen before any experiment: [docs/PREREGISTRATION.md](docs/PREREGISTRATION.md). Changes after the freeze are logged in [docs/DEVIATIONS.md](docs/DEVIATIONS.md).
 
 Student data is never stored in this repository.
+
+License: MIT, see [LICENSE](LICENSE).
