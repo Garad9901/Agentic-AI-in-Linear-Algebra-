@@ -4,15 +4,15 @@
 # Fill in and commit with tag models-v1 before the first test-split run.
 
 models:
-  - provider:
-    model_id:
-    family:
-    release_date:
-    access_date:
+  - provider: groq
+    model_id: openai/gpt-oss-120b
+    family: OpenAI gpt-oss
+    release_date: 2025-08-05  # Groq changelog, 5 Aug 2025
+    access_date: 2026-11-01
     temperature: 0.7
-  - provider:
-    model_id:
-    family:
-    release_date:
-    access_date:
+  - provider: gemini
+    model_id: gemini-3.8-flash
+    family: Google Gemini
+    release_date: 2026-09-02  # Gemini API changelog, GA 2 Sep 2026
+    access_date: 2026-11-01
     temperature: 0.7
