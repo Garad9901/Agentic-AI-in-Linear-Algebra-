@@ -7,3 +7,17 @@ The analysis plan was frozen before any experiment: [docs/PREREGISTRATION.md](do
 Student data is never stored in this repository.
 
 License: MIT, see [LICENSE](LICENSE).
+
+## Code (added 1 Nov 2026, before any LLM run)
+
+| Path | What it is |
+|---|---|
+| `latutor/verifier.py` | Verification Agent: SymPy certificates for every claim type and every student step |
+| `latutor/generator.py` | Certified problem bank D1 (270 problems, seed 20261024) |
+| `latutor/grader.py` | Ground-truth grader (stored solution only; never calls the verifier) |
+| `latutor/systems.py` | S0, B1–B4, A1–A4 |
+| `latutor/llm.py`, `latutor/prompts.py` | OpenAI-compatible LLM backend; prompts-v1 |
+| `latutor/stats.py`, `scripts/analyse.py` | McNemar, matched-pairs OR, Holm, Wilcoxon, cluster bootstrap; tables T2–T7 |
+| `scripts/run_benchmark.py` | Runner with pre-registration gates for the test split |
+
+How to run: [docs/RUNNING.md](docs/RUNNING.md). Open choices awaiting author approval: [docs/PROPOSED_DEVIATIONS.md](docs/PROPOSED_DEVIATIONS.md).

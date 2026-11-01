@@ -1,0 +1,6 @@
+{
+  "version": "taxonomy-v1",
+  "frozen": false,
+  "note": "Built by open coding on the D3 dev split only (PREREGISTRATION.md s4.4). Fill in the labels, set frozen=true, commit and tag taxonomy-v1 BEFORE the test split is annotated. The runner refuses D3 test runs until then.",
+  "labels": []
+}
