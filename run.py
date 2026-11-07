@@ -154,6 +154,8 @@ def run_one(system: str, problem: dict, taxonomy: list, run: int, mode: str = "s
         "weak_steps": outcome.get("weak_steps"),
         "pred_first_wrong_step": outcome.get("pred_first_wrong_step"),
         "pred_misconception": outcome.get("pred_misconception") or "",
+        "flags_json": json.dumps({"steps": outcome["step_flags"], "answer": outcome["answer_flag"]})
+        if outcome.get("step_flags") is not None else "null",
         "error": error,
         **usage,
         "local_seconds": round(local, 3),
@@ -197,6 +199,8 @@ def main() -> None:
         sys.exit("--batch is for --provider gemini only")
     if args.split == "test" and not FROZEN.exists():
         sys.exit("refusing to run the test split: create the file FROZEN once the prompts are frozen")
+    if args.dataset == "d3" and args.split == "test" and not d3_data.taxonomy_v1_ready():
+        sys.exit("refusing to run the D3 test split: the taxonomy must be frozen and tagged taxonomy-v1")
 
     problems = round_robin(load_dataset(args.dataset, args.split))
     if args.limit is not None:

@@ -1,2 +1,2 @@
-system,n,api_errors_excluded,answered,wrong_delivered_rate,consistent_computation_error_rate,fabricated_rate,abstention_rate,no_parseable_reply,accuracy_when_answered
-B1,6,4,6,0.167 (1/6),0.167 (1/6),0.000 (0/2),0.000 (0/6),0,0.833 (5/6)
+system,n,api_errors_excluded,answered,wrong_delivered_rate,consistent_computation_error_rate,fabricated_rate,abstention_rate,answer_withheld_rate,no_parseable_reply,accuracy_when_answered
+B1,6,4,6,0.167 (1/6),0.167 (1/6),0.000 (0/2),0.000 (0/6),0.000 (0/6),0,0.833 (5/6)

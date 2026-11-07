@@ -139,13 +139,30 @@ def _verifier_statuses(problem: dict, claims: list, trace, answer) -> list:
     return statuses
 
 
-def claim_stats(problem: dict, delivered: bool, trace, answer, hints: list) -> dict:
-    """RQ1 and RQ4 for one response. A response that delivers nothing makes no claims."""
+def _is_delivered(item: dict, step_flags, answer_delivered: bool) -> bool:
+    if item["where"] == "step":
+        return step_flags is None or step_flags[item["index"]] != "withheld"
+    if item["where"] == "final":
+        return answer_delivered
+    return True
+
+
+def claim_stats(problem: dict, delivered: bool, trace, answer, hints: list, step_flags=None,
+                answer_delivered: bool = True) -> dict:
+    """RQ1 and RQ4 for one response.
+
+    RQ1 counts only what reached the student: OURS withholds refuted claims. RQ4 counts every
+    claim in the final version, withheld ones included, as prereg-v1 registered it. A response
+    that delivers nothing (abstained, or no usable reply) makes no claims.
+    """
     claims = extract(problem, trace, answer, hints) if delivered else []
-    grades = [grader.grade_claim(problem, item["claim"]) for item in claims]
+    shown = [item for item in claims if _is_delivered(item, step_flags, answer_delivered)]
+    grades = [grader.grade_claim(problem, item["claim"]) for item in shown]
     statuses = _verifier_statuses(problem, claims, trace, answer)
     return {
         "n_claims": len(claims),
+        "n_delivered_claims": len(shown),
+        "n_withheld_claims": len(claims) - len(shown),
         "n_wrong_claims": grades.count("wrong"),
         "n_unscorable_claims": grades.count("unscorable"),
         "wrong_claim": int("wrong" in grades),
@@ -156,32 +173,46 @@ def claim_stats(problem: dict, delivered: bool, trace, answer, hints: list) -> d
     }
 
 
+def hints_counted(row) -> bool:
+    """D1 hints are exploratory and scored in run 1 only (decision of 2026-11-07). Single-prompt
+    systems write hints in every run, so their D1 hints in runs 2 and 3 are set aside."""
+    return not (str(row["problem_id"]).startswith("D1-") and int(row["run"]) != 1)
+
+
 def grade_d1(frame: pd.DataFrame, problems: dict) -> pd.DataFrame:
     """Add grade columns. api_error rows are dropped: they say nothing about a system."""
     usable = frame[frame["status"] != "api_error"].copy()
     correct, wrong, consistent, fabricated, delivered, leaks, verified, with_claim, n_hints = ([] for _ in range(9))
-    stats = []
+    stats, flagged = [], []
     for _, row in usable.iterrows():
         p = problems[row["problem_id"]]
         answer = json.loads(row["answer_json"])
         has_answer = row["status"] == "answered" and answer is not None
         ok = has_answer and grader.grade(p, answer)
-        trace = json.loads(row["trace_json"])
+        flags = json.loads(row["flags_json"]) if "flags_json" in row and row["flags_json"] else None
+        step_flags = flags["steps"] if flags else None
+        full_trace = json.loads(row["trace_json"])
+        trace = full_trace
+        if step_flags is not None and isinstance(full_trace, list):  # what the student saw
+            trace = [s for s, f in zip(full_trace, step_flags) if f != "withheld"]
         correct.append(ok)
         wrong.append(has_answer and not ok)
         delivered.append(has_answer)
         consistent.append(has_answer and grader.consistent_computation_error(p, answer, trace))
         fabricated.append(grader.fabricated(p, answer if has_answer else None, trace))
-        hints = delivered_hints(row)
+        hints = delivered_hints(row) if hints_counted(row) else []
+        flagged.append(sum(h.get("flag") == "unverified" for h in hints))
         truth = grader.answer_of(p)
         leaks.append(sum(leak_check(h["text"], p["topic"], truth, h.get("claims")).leaked for h in hints))
         checks = [verify_hint(p, h["text"], h.get("claims")) for h in hints]
         verified.append(sum(c.verified for c in checks))
         with_claim.append(sum(c.verified and c.n_certified > 0 for c in checks))
         n_hints.append(len(hints))
-        stats.append(claim_stats(p, row["status"] == "answered", trace, answer, hints))
-    for column in ("n_claims", "n_wrong_claims", "n_unscorable_claims", "n_weakly_graded", "wrong_claim",
-                   "n_certified", "n_weak", "n_refuted"):
+        made_claims = row["status"] in ("answered", "answer_withheld")
+        stats.append(claim_stats(p, made_claims, full_trace, answer, hints, step_flags, row["status"] == "answered"))
+    usable["hints_flagged_unverified"] = flagged
+    for column in ("n_claims", "n_delivered_claims", "n_withheld_claims", "n_wrong_claims", "n_unscorable_claims",
+                   "n_weakly_graded", "wrong_claim", "n_certified", "n_weak", "n_refuted"):
         usable[column] = [s[column] for s in stats]
     usable["correct"] = correct
     usable["wrong"] = wrong
@@ -416,6 +447,7 @@ def t3b_reliability(graded: dict, names: list, raw: dict) -> pd.DataFrame:
             "consistent_computation_error_rate": _ratio(int(f["consistent_error"].sum()), n),
             "fabricated_rate": _fabricated_rate(f),
             "abstention_rate": _ratio(int((f["status"] == "abstained").sum()), n),
+            "answer_withheld_rate": _ratio(int((f["status"] == "answer_withheld").sum()), n),
             "no_parseable_reply": int((f["status"] == "parse_error").sum()),
             "accuracy_when_answered": _ratio(int(f["correct"].sum()), int(f["delivered"].sum())),
         })
@@ -495,6 +527,7 @@ def t5_hints(graded: dict, names: list) -> pd.DataFrame:
             "leak_rate": _ratio(int(f["hints_leaked"].sum()), delivered),
             "verified_rate": _ratio(int(f["hints_verified"].sum()), delivered),
             "verified_with_certified_claim": _ratio(int(f["hints_with_certified_claim"].sum()), delivered),
+            "delivered_with_unverified_flag": _ratio(int(f["hints_flagged_unverified"].sum()), delivered),
         })
     return pd.DataFrame(rows)
 
@@ -598,12 +631,14 @@ def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap
         "Share of responses with at least 1 delivered claim that contradicts the ground truth, graded by "
         "grader.py and never by the verifier. Mean, SD and range are over runs; the 95% CI comes from a "
         f"bootstrap of {bootstrap} resamples clustered by problem.",
-        "A response that abstains or gives no usable reply delivers no claims, so it cannot be wrong. Read this "
-        "with the abstention rate in T3b.",
+        "Only delivered claims count: OURS withholds refuted claims. A response that abstains or gives no usable "
+        "reply delivers no claims, so it cannot be wrong. Read this with the abstention and answer-withheld rates "
+        "in T3b.",
         "The human audit of 10% of claim extractions (PREREGISTRATION.md s3) has not been done.",
     ]))
     tables.append(("T3d", "RQ4 certified-claim coverage (OURS)", t3d_coverage(graded.get(S0), bootstrap), [
-        "Certified claims / all extracted claims in the delivered version, from the verifier. A row operation "
+        "Certified claims / all extracted claims in the final version of each response, withheld claims "
+        "included, as registered. A row operation "
         "is certified only if applying its stated operation reproduces the next matrix exactly. Claims that "
         "pass on row-equivalence alone are weakly checked: they never count as certified, and are reported "
         "separately. Decidable share is (certified + refuted) / all.",
@@ -629,6 +664,7 @@ def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap
         notes = [f"Blank: {d3_note}."]
     tables.append(("T4b", "Cohen's kappa between the two D3 annotators", frame, notes))
     tables.append(("T5", "Hint leak rate and hint-verified rate", t5_hints(graded, base), [
+        "D1 hints are exploratory and counted in run 1 only. "
         "Both rates are over delivered hints, measured by the same checks for every system. Leaks are "
         "checked against the stored ground truth. B1, B2 and B3 are measured but never filtered. A hint "
         "with no computed values counts as verified, so the last column shows how many passed with at least "

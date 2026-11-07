@@ -147,6 +147,8 @@ class HintCheck:
     n_claims: int = 0
     n_certified: int = 0
     reasons: list = field(default_factory=list)
+    statuses: list = field(default_factory=list)  # one per claim
+    unattested: list = field(default_factory=list)
 
 
 def verify_hint(problem: dict, text: str, claims) -> HintCheck:
@@ -159,6 +161,7 @@ def verify_hint(problem: dict, text: str, claims) -> HintCheck:
         allowed.update(b)
     for c in claims:
         status = check_claim(problem, c)
+        result.statuses.append(status)
         if status == CERTIFIED:
             result.n_certified += 1
             allowed.update(_claim_numbers(c))
@@ -166,6 +169,7 @@ def verify_hint(problem: dict, text: str, claims) -> HintCheck:
             result.verified = False
             result.reasons.append(f"claim {status}: {c}")
     unattested = [x for x in numbers_in(text) if x not in allowed]
+    result.unattested = sorted(set(map(str, unattested)))
     if unattested:
         result.verified = False
         result.reasons.append(f"values in the text with no certified claim: {sorted(set(map(str, unattested)))}")

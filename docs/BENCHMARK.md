@@ -90,10 +90,10 @@ The rest of `latutor/` and the older scripts are kept for the record, but they n
 | B2 | Solver, then an LLM verifier judges the solution and each hint | What the LLM approves. Otherwise it abstains or withholds |
 | B3 | B1, then a self-check prompt | Everything, unchecked |
 | B4 | Solver, then a Hint call per level | Everything, unchecked |
-| OURS | Solver with up to 2 retries, then checked hints with up to 2 regenerations each | Verified answers and verified hints. Otherwise it abstains or withholds |
-| A1 | OURS without verification: the same configuration as B4 | Everything, unchecked |
-| A2 | OURS verifying the final answer only | As OURS |
-| A3 | OURS without the Diagnostic Agent: the same as OURS on D1 and D2 | As OURS |
+| OURS | Solver with up to 2 repairs, then checked hints with up to 2 regenerations each | Everything except claims still refuted. Claims it cannot certify, including weakly checked ones, carry an "unverified" flag. Hints are withheld only if they leak or hold a refuted claim |
+| A1 | OURS without verification: the same configuration as B4, reported as one result | Everything, unchecked |
+| A2 | OURS verifying the final answer only | As OURS, with every step flagged unverified |
+| A3 | OURS without the Diagnostic Agent: the same as OURS on D1 and D2, reported as one result there | As OURS |
 | A4 | OURS with one hint, not three levels | As OURS |
 | DET | Zero-shot first-error detector, D3 only | No answer or hints |
 
@@ -108,7 +108,8 @@ The rest of `latutor/` and the older scripts are kept for the record, but they n
 - **Hint leak**: `verifier/leak.py`, run against the stored ground truth in `score.py` and against the verified Solver answer inside OURS. It cannot detect a hint that makes the answer obvious without stating it. That needs human rating.
 - **Hint verified**: every declared claim is certified, and every number in the text is in the problem, in a certified claim, or is 0 or +-1. A hint with no computed values counts as verified, so read `verified_rate` next to `verified_with_certified_claim`.
 - **Step F1** is for the class "wrong". Steps after the predicted first error are not scored, because every system predicts only the first error.
-- **Abstain** means no answer and no hints reach the student.
+- **Abstain** (B2 only) means no answer and no hints reach the student. **Answer withheld** (OURS) means the final answer was still refuted after repair; the rest of the response is delivered.
+- **D1 hints** are exploratory, made and scored in run 1 only. RQ3 is measured on D3.
 - **No usable reply** means the system never produced usable JSON. It counts as not correct, because it is a failure to answer. API errors are different: they say nothing about a system, so those rows are left out, and the tables warn when that makes systems incomparable.
 - **Tokens** are `total_tokens` as the provider reports them. Gemini counts thinking there and not in `completion_tokens`.
 
@@ -123,3 +124,5 @@ The rest of `latutor/` and the older scripts are kept for the record, but they n
 Copy `data/d3_template.csv` to `data/private/d3.csv`, which is git-ignored, and follow [ANNOTATION_GUIDE.md](ANNOTATION_GUIDE.md). `data/taxonomy.json` keeps its `categories` list empty until the authors fill it from real data.
 
 Until D3 exists, `run.py --dataset d3` refuses to run, and T4, T4b and the D3 row of T1 stay blank.
+
+The D3 test split cannot be annotated until the taxonomy is frozen: set `"frozen": true` in `data/taxonomy.json`, commit, and `git tag taxonomy-v1`. Until then, `tools/annotation_sheet.py --split test` refuses to make sheets, `d3.py` refuses to load test-split labels, and `run.py` refuses the D3 test split.

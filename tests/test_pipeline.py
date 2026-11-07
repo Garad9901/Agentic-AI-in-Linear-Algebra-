@@ -320,8 +320,8 @@ def script(monkeypatch, replies):
 
 def test_verification_passes_first_time(monkeypatch):
     script(monkeypatch, [GOOD])
-    result = verification.solve_verified(P)
-    assert result.verified and result.retries == 0
+    result = verification.solve_flagged(P)
+    assert result.answer_flag == "certified" and result.step_flags == ["certified"] and result.retries == 0
 
 
 def test_verification_retries_with_the_reason(monkeypatch):
@@ -332,38 +332,86 @@ def test_verification_retries_with_the_reason(monkeypatch):
         return BAD if len(prompts) == 1 else GOOD
 
     monkeypatch.setattr(llm, "call_llm", fake)
-    result = verification.solve_verified(P)
-    assert result.verified and result.retries == 1
+    result = verification.solve_flagged(P)
+    assert result.answer_flag == "certified" and result.retries == 1
     assert "rejected it" in prompts[1] and "determinant is not exactly" in prompts[1]
 
 
-def test_verification_abstains_after_two_retries(monkeypatch):
+def test_verification_withholds_only_what_stays_refuted(monkeypatch):
     roles = script(monkeypatch, [BAD, BAD, BAD])
-    result = verification.solve_verified(P)
-    assert not result.verified and result.solution is None and result.retries == 2
-    assert len(roles) == 3
+    result = verification.solve_flagged(P)
+    assert result.retries == 2 and len(roles) == 3
+    assert result.answer_flag == "withheld" and result.step_flags == ["withheld"]
+    assert result.delivered() == {"steps": [], "answer": None}
 
 
-def test_verification_steps_mode_rejects_a_bad_trace(monkeypatch):
-    right_answer_bad_trace = json.dumps({"steps": [{"expr": "1*4-2*3", "value": 5}], "answer": {"determinant": -2}})
-    script(monkeypatch, [right_answer_bad_trace] * 3)
-    assert not verification.solve_verified(P, "steps").verified
-    script(monkeypatch, [right_answer_bad_trace])
-    assert verification.solve_verified(P, "final").verified
+RIGHT_ANSWER_BAD_TRACE = json.dumps({"steps": [{"expr": "1*4-2*3", "value": 5}, {"text": "so"}],
+                                     "answer": {"determinant": -2}})
 
 
-def test_hint_regenerates_then_passes(monkeypatch):
-    script(monkeypatch, [LEAK, FALSE, NO_LEAK, NO_LEAK, NO_LEAK])
-    solution = {"answer": {"determinant": -2}, "steps": []}
-    h = hint.make_hints(P, solution, reject=hint.certificate_rejection(P, solution))[0]
-    assert not h["withheld"] and h["regenerations"] == 2
+def test_a_refuted_step_is_withheld_and_the_rest_delivered(monkeypatch):
+    script(monkeypatch, [RIGHT_ANSWER_BAD_TRACE] * 3)
+    result = verification.solve_flagged(P, "steps")
+    assert result.step_flags == ["withheld", "unverified"] and result.answer_flag == "certified"
+    assert result.delivered() == {"steps": [{"text": "so"}], "answer": {"determinant": -2}}
+
+
+def test_final_mode_flags_every_step_unverified(monkeypatch):
+    script(monkeypatch, [RIGHT_ANSWER_BAD_TRACE])
+    result = verification.solve_flagged(P, "final")
+    assert result.step_flags == ["unverified", "unverified"] and result.answer_flag == "certified"
+    assert result.retries == 0
+
+
+def test_an_unreadable_answer_is_flagged_not_withheld(monkeypatch):
+    script(monkeypatch, [json.dumps({"steps": [], "answer": {"determinant": "x"}})] * 3)
+    assert verification.solve_flagged(P).answer_flag == "unverified"
+
+
+def test_a_repair_that_cannot_be_read_keeps_the_last_version(monkeypatch):
+    script(monkeypatch, [BAD, "not json", "still not json"])
+    result = verification.solve_flagged(P)
+    assert result.solution == json.loads(BAD) and result.answer_flag == "withheld"
+
+
+REFUTED_HINT = json.dumps({"text": "Note that det A is 5.", "claims": [{"type": "determinant", "value": 5}]})
+UNCHECKABLE_HINT = json.dumps({"text": "Think about it.", "claims": [{"type": "vibes"}]})
+
+
+def _review():
+    return hint.certificate_review(P, [{"determinant": -2}])
+
+
+def test_a_leaking_hint_is_regenerated(monkeypatch):
+    script(monkeypatch, [LEAK, NO_LEAK, NO_LEAK, NO_LEAK])
+    h = hint.make_hints(P, {"answer": {"determinant": -2}}, review=_review())[0]
+    assert not h["withheld"] and h["regenerations"] == 1 and h["flag"] == "certified"
+
+
+def test_a_hint_with_a_refuted_claim_is_regenerated(monkeypatch):
+    script(monkeypatch, [REFUTED_HINT, NO_LEAK, NO_LEAK, NO_LEAK])
+    h = hint.make_hints(P, {"answer": {"determinant": -2}}, review=_review())[0]
+    assert not h["withheld"] and h["regenerations"] == 1
+
+
+def test_an_unverifiable_hint_is_delivered_with_the_flag(monkeypatch):
+    script(monkeypatch, [FALSE, UNCHECKABLE_HINT, NO_LEAK])
+    hints = hint.make_hints(P, {"answer": {"determinant": -2}}, review=_review())
+    assert [h["withheld"] for h in hints] == [False, False, False]
+    assert [h["flag"] for h in hints] == ["unverified", "unverified", "certified"]  # 77 is unattested
+    assert hints[1]["claim_flags"] == ["unverified"]
 
 
 def test_hint_withheld_after_two_regenerations(monkeypatch):
     roles = script(monkeypatch, [LEAK, LEAK, LEAK, NO_LEAK, NO_LEAK])
-    solution = {"answer": {"determinant": -2}, "steps": []}
-    h = hint.make_hints(P, solution, reject=hint.certificate_rejection(P, solution))[0]
+    h = hint.make_hints(P, {"answer": {"determinant": -2}}, review=_review())[0]
     assert h["withheld"] and h["text"] == "" and len(roles) == 5
+
+
+def test_the_leak_guard_also_uses_the_verifiers_own_answer(monkeypatch):
+    script(monkeypatch, [LEAK, NO_LEAK, NO_LEAK, NO_LEAK])
+    review = hint.certificate_review(P, [None, {"determinant": -2}])  # the Solver's answer was withheld
+    assert hint.make_hints(P, None, review=review)[0]["regenerations"] == 1
 
 
 def test_diagnostic_empty_taxonomy_gives_no_label(monkeypatch):
@@ -450,11 +498,14 @@ def test_b4_never_filters(monkeypatch):
     assert out["answer"] == {"determinant": 10} and out["hints"][0]["text"] == "The determinant is -2."
 
 
-def test_ours_abstention_reaches_the_student_with_nothing(monkeypatch):
-    roles = script(monkeypatch, [BAD, BAD, BAD])
+def test_ours_withholds_a_refuted_answer_and_still_helps(monkeypatch):
+    roles = script(monkeypatch, [BAD, BAD, BAD, LEAK, NO_LEAK, NO_LEAK, NO_LEAK])
     out = run_system("OURS", P, [])
-    assert out["status"] == "abstained" and out["answer"] is None and out["hints"] == []
-    assert roles == ["solver"] * 3
+    assert out["status"] == "answer_withheld" and out["answer_flag"] == "withheld"
+    assert out["step_flags"] == ["withheld"]
+    assert roles[:3] == ["solver"] * 3 and len(out["hints"]) == 3
+    # The leak guard used the verifier's own answer, -2, so the leaking hint was regenerated.
+    assert out["hints"][0]["regenerations"] == 1
 
 
 def test_truncated_replies_count_as_no_answer_for_every_system(monkeypatch):
@@ -480,9 +531,32 @@ def test_a1_removes_verification(monkeypatch):
 def test_a2_verifies_the_final_answer_only(monkeypatch):
     right_answer_bad_trace = json.dumps({"steps": [{"expr": "1*4-2*3", "value": 5}], "answer": {"determinant": -2}})
     script(monkeypatch, [right_answer_bad_trace, NO_LEAK, NO_LEAK, NO_LEAK])
-    assert run_system("A2", P, [])["status"] == "answered"
-    script(monkeypatch, [right_answer_bad_trace] * 3)
-    assert run_system("OURS", P, [])["status"] == "abstained"
+    out = run_system("A2", P, [])
+    assert out["status"] == "answered" and out["step_flags"] == ["unverified"]
+    script(monkeypatch, [right_answer_bad_trace] * 3 + [NO_LEAK] * 3)
+    out = run_system("OURS", P, [])
+    assert out["status"] == "answered" and out["step_flags"] == ["withheld"]
+
+
+D1_P = {**P, "id": "D1-x", "dataset": "d1"}
+
+
+def test_d1_hints_are_made_in_run_1_only(monkeypatch):
+    for system in ("OURS", "B4", "B2"):
+        replies = [GOOD] + ([JUDGE_OK] if system == "B2" else [])
+        script(monkeypatch, replies)
+        with llm.use_run(2):
+            out = run_system(system, D1_P, [])
+        assert out["hints"] == [], system
+    script(monkeypatch, [GOOD, NO_LEAK, NO_LEAK, NO_LEAK])
+    with llm.use_run(1):
+        assert len(run_system("OURS", D1_P, [])["hints"]) == 3
+
+
+def test_student_work_gets_hints_in_every_run(monkeypatch):
+    script(monkeypatch, [GOOD, '{"first_wrong_step": 1, "misconception": "SIGN"}', NO_LEAK, NO_LEAK, NO_LEAK])
+    with llm.use_run(3):
+        assert len(run_system("OURS", STUDENT, ["SIGN"])["hints"]) == 3
 
 
 def test_a4_gives_a_single_hint(monkeypatch):

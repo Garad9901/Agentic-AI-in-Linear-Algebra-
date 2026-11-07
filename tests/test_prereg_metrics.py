@@ -20,7 +20,8 @@ import score
 from extraction import extract
 from latutor.stats import holm, mcnemar
 from scripts import cost_probe
-from tools import claim_audit
+from tools import annotation_sheet, claim_audit
+import d3
 from verifier import check_claim, step_statuses, verify_hint
 
 DET = {"id": "d", "topic": "determinant", "size": 2, "A": [[1, 2], [3, 4]], "ground_truth": {"determinant": -2}}
@@ -495,6 +496,118 @@ def test_design_tokens_by_hand():
     # D1 270 x 3 = 810. D2 210 x 3 = 630. Ablations 2 x 810 = 1620. Sum 3060 problem-runs.
     out = cost_probe.design_tokens({"OURS": (1, 10)}, {"OURS": (1, 10)})
     assert out == {"input": 3060, "output": 30600}
+
+
+# ---- decision of 2026-11-07: OURS withholds only refuted claims
+def _ours_row(status, answer, trace, flags, run=1, pid="D1-d"):
+    return {"problem_id": pid, "run": run, "topic": "determinant", "size": 3, "status": status, "mode": "sync",
+            "answer_json": json.dumps(answer), "trace_json": json.dumps(trace), "hints_json": "[]",
+            "flags_json": json.dumps(flags), "pred_misconception": ""}
+
+
+def test_rq1_counts_delivered_claims_and_rq4_counts_withheld_ones_too():
+    # Step 1 is a wrong row operation, withheld. Step 2 is the right determinant, delivered.
+    # RQ1 sees only step 2 and the certified answer: no wrong claim. RQ4 sees all 3 claims.
+    trace = [{"op": "R2 <- R2 - 3R1", "matrix": [[1, 2], [0, -3]]}, {"value": -2}]
+    flags = {"steps": ["withheld", "certified"], "answer": "certified"}
+    graded = score.grade_d1(pd.DataFrame([_ours_row("answered", {"determinant": -2}, trace, flags)]), {"D1-d": DET})
+    row = graded.iloc[0]
+    assert (row["n_claims"], row["n_delivered_claims"], row["n_withheld_claims"]) == (3, 2, 1)
+    assert row["wrong_claim"] == 0 and row["n_refuted"] == 1
+
+
+def test_without_withholding_the_same_response_would_be_wrong():
+    trace = [{"op": "R2 <- R2 - 3R1", "matrix": [[1, 2], [0, -3]]}, {"value": -2}]
+    stats = score.claim_stats(DET, True, trace, {"determinant": -2}, [])
+    assert stats["wrong_claim"] == 1
+
+
+def test_a_withheld_answer_is_not_delivered_but_its_steps_are():
+    trace = [{"op": "R2 <- R2 - 3R1", "matrix": [[1, 2], [0, -2]]}]
+    flags = {"steps": ["certified"], "answer": "withheld"}
+    graded = score.grade_d1(pd.DataFrame([_ours_row("answer_withheld", {"determinant": 9}, trace, flags)]), {"D1-d": DET})
+    row = graded.iloc[0]
+    assert not row["delivered"] and not row["correct"] and not row["wrong"]
+    assert (row["n_delivered_claims"], row["n_withheld_claims"], row["wrong_claim"]) == (1, 1, 0)
+    table = score.t3b_reliability({"OURS": graded}, ["OURS"], {"OURS": graded})
+    assert table.iloc[0]["answer_withheld_rate"] == "1.000 (1/1)"
+
+
+def test_d1_hints_count_in_run_1_only():
+    assert score.hints_counted({"problem_id": "D1-x", "run": 1})
+    assert not score.hints_counted({"problem_id": "D1-x", "run": 2})
+    assert score.hints_counted({"problem_id": "D2-x", "run": 3})
+    assert score.hints_counted({"problem_id": "S017-P2", "run": 2})
+
+
+def test_single_prompt_hints_in_later_runs_are_set_aside():
+    hints = [{"text": "det A is 7", "claims": [{"type": "determinant", "value": 7}]}]
+    rows = [{**_ours_row("answered", {"determinant": -2}, [], None, run=r), "hints_json": json.dumps(hints),
+             "flags_json": "null"} for r in (1, 2)]
+    graded = score.grade_d1(pd.DataFrame(rows), {"D1-d": DET})
+    assert graded["wrong_claim"].tolist() == [1, 0] and graded["hints_delivered"].tolist() == [1, 0]
+
+
+def test_verifier_computes_the_answer_itself_and_it_matches_the_truth():
+    from data import gen_d1
+    from verifier import compute_answer
+    for p in gen_d1.generate(n_per_cell=1):
+        assert grader.grade(p, compute_answer(p["topic"], p)), p["id"]
+
+
+def test_verifier_answer_is_none_when_there_is_no_exact_one():
+    from verifier import compute_answer
+    assert compute_answer("inverse", {"A": [[1, 2], [2, 4]]}) is None
+    assert compute_answer("eigenpairs", {"A": [[0, 1], [2, 0]]}) is None  # eigenvalues +-sqrt(2)
+
+
+# ---- decision of 2026-11-07: taxonomy-v1 gate on D3 test annotation
+def _solution_on(split):
+    return next(f"S{i:03d}-P1" for i in range(1000) if d3.split_of(f"S{i:03d}-P1") == split)
+
+
+def _d3_rows(split, labelled):
+    sid = _solution_on(split)
+    return pd.DataFrame([{"solution_id": sid, "topic": "determinant", "problem": "A = [[1,2],[3,4]]", "step_no": "1",
+                          "step_text": "", "step_value": "-2", "annotator": "a" if labelled else "",
+                          "step_label": "correct" if labelled else "", "first_error_step": "",
+                          "misconception": ""}])
+
+
+def test_taxonomy_is_not_frozen_yet():
+    assert json.loads((run.ROOT / "data" / "taxonomy.json").read_text(encoding="utf-8"))["frozen"] is False
+    assert not d3.taxonomy_v1_ready()
+
+
+def test_labelled_test_rows_are_refused_until_taxonomy_v1(monkeypatch):
+    with pytest.raises(d3.D3Unavailable, match="taxonomy"):
+        d3.check_annotation_gate(_d3_rows("test", labelled=True))
+    d3.check_annotation_gate(_d3_rows("dev", labelled=True))     # dev annotation builds the taxonomy
+    d3.check_annotation_gate(_d3_rows("test", labelled=False))   # transcription alone is fine
+    monkeypatch.setattr(d3, "taxonomy_v1_ready", lambda: True)
+    d3.check_annotation_gate(_d3_rows("test", labelled=True))
+
+
+def test_annotation_sheets_for_the_test_split_are_refused(tmp_path):
+    with pytest.raises(SystemExit, match="taxonomy-v1"):
+        annotation_sheet.make_sheet("test", "a", tmp_path / "d3.csv")
+
+
+def test_annotation_sheet_for_dev_has_blank_labels(tmp_path, monkeypatch):
+    source = tmp_path / "d3.csv"
+    _d3_rows("dev", labelled=False).to_csv(source, index=False)
+    monkeypatch.setattr(d3, "D3_PATH", tmp_path / "d3.csv")
+    out = annotation_sheet.make_sheet("dev", "rater1", source)
+    sheet = pd.read_csv(out, dtype=str, keep_default_na=False)
+    assert (sheet["annotator"] == "rater1").all() and (sheet["step_label"] == "").all()
+
+
+def test_runner_refuses_the_d3_test_split_before_taxonomy_v1(monkeypatch, tmp_path):
+    monkeypatch.setattr(run, "FROZEN", tmp_path / "FROZEN")
+    (tmp_path / "FROZEN").write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["run.py", "--provider", "groq", "--system", "OURS", "--dataset", "d3", "--split", "test"])
+    with pytest.raises(SystemExit, match="taxonomy-v1"):
+        run.main()
 
 
 # ---- claim audit

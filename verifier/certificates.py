@@ -20,7 +20,7 @@ from dataclasses import dataclass
 
 import sympy as sp
 
-from .exact import ParseError, is_rref, mat, num, pivot_count, same_rowspace, vec
+from .exact import ParseError, is_rref, mat, num, pivot_count, same_rowspace, to_json, vec
 
 LAM = sp.Symbol("lam")
 
@@ -128,6 +128,36 @@ def check_least_squares(A, b, c) -> Verdict:
     if A.T * A * x != A.T * b:
         return _fail("A^T A x != A^T b")
     return Verdict(True)
+
+
+def compute_answer(topic: str, problem: dict) -> dict | None:
+    """The answer the Verification Agent computes itself from A (and b), in the candidate schema.
+
+    Used only to stop hints leaking the answer. It never reads the stored ground truth.
+    None if the answer is not exact and rational, or the problem has none.
+    """
+    try:
+        A, b = problem_matrices(problem)
+        if topic == "rref_rank":
+            R, pivots = A.rref()
+            return {"rref": to_json(R), "rank": len(pivots)}
+        if topic == "determinant":
+            return {"determinant": to_json(A.det(method="bareiss"))}
+        if topic == "inverse":
+            return {"inverse": to_json(A.inv())} if A.det(method="bareiss") != 0 else None
+        if topic == "eigenpairs":
+            pairs = [{"eigenvalue": to_json(lam), "eigenvector": to_json(sp.Matrix(v))}
+                     for lam, _, basis in A.eigenvects() for v in basis]
+            return {"eigenpairs": pairs}
+        if topic == "diagonalisation":
+            P, D = A.diagonalize()
+            return {"P": to_json(P), "D": to_json(D)}
+        if topic == "least_squares" and b is not None:
+            return {"x": to_json((A.T * A).LUsolve(A.T * b))}
+    except (ParseError, TypeError, ValueError, sp.matrices.exceptions.NonInvertibleMatrixError,
+            sp.matrices.exceptions.MatrixError):
+        return None
+    return None
 
 
 def verify(topic: str, problem: dict, candidate) -> Verdict:

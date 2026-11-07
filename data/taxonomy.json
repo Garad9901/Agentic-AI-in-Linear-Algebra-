@@ -1,4 +1,5 @@
 {
-  "_comment": "Empty on purpose: the authors will fill in the categories from real student data. Do not invent any.",
+  "_comment": "Empty on purpose: the authors will fill in the categories from real student data. Do not invent any. Set frozen to true and tag taxonomy-v1 before the D3 test split is annotated.",
+  "frozen": false,
   "categories": []
 }

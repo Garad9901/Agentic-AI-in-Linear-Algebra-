@@ -12,23 +12,30 @@
 run_system() returns what a system produced and what reached the student. It
 never grades: grading against the stored ground truth happens in score.py.
 
-D1 and D2 have no student work, so the Diagnostic Agent cannot run on them and
-hints are written for a student who is stuck and has not started. That makes A1
-the same configuration as B4, and A3 the same as OURS, on those datasets.
+OURS repairs, then withholds only claims still refuted and delivers the rest, with an
+"unverified" flag on claims it cannot certify (decision of 2026-11-07). Its result
+keeps the whole final version, with step_flags and answer_flag saying what was withheld.
+
+D1 and D2 have no student work, so the Diagnostic Agent cannot run on them and hints
+are written for a student who is stuck and has not started. Hints on D1 are exploratory
+and made in run 1 only (decision of 2026-11-07). A1 is the same configuration as B4,
+and A3 the same as OURS on D1 and D2; each pair is reported as one result.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
+import llm
 from agents import diagnostic, hint, llm_verifier, solver, verification
 from agents import prompts as P
 from agents.base import ask_json
-from verifier import check_steps
+from verifier import check_steps, compute_answer
 from verifier.steps import normalise_step
 
 SYSTEMS = ["B1", "B2", "B3", "B4", "OURS"]
 ABLATIONS = ["A1", "A2", "A3", "A4"]
 STUDENT_ONLY = ["DET"]
+HINT_RUNS_D1 = {1}
 
 
 @dataclass(frozen=True)
@@ -45,6 +52,13 @@ _ABLATION_OPTIONS = {
 }
 
 
+def hints_wanted(problem: dict) -> bool:
+    """Hints on D1 are made in run 1 only. Student work always gets hints."""
+    if problem.get("dataset") == "d1":
+        return llm.current_run() in HINT_RUNS_D1
+    return True
+
+
 def _outcome(status, solution=None, hints=None, **extra) -> dict:
     solution = solution if isinstance(solution, dict) else {}
     out = {
@@ -59,6 +73,8 @@ def _outcome(status, solution=None, hints=None, **extra) -> dict:
         "weak_steps": None,
         "pred_first_wrong_step": None,
         "pred_misconception": None,
+        "step_flags": None,
+        "answer_flag": None,
     }
     out.update(extra)
     return out
@@ -103,28 +119,23 @@ def _agents_unverified(problem: dict, taxonomy: list) -> dict:
     if solution is None:
         return _outcome("parse_error")
     wrong_step, misconception = _diagnose(problem, taxonomy, solution)
-    hints = hint.make_hints(problem, solution, misconception, wrong_step)
+    hints = hint.make_hints(problem, solution, misconception, wrong_step) if hints_wanted(problem) else []
     return _outcome("answered", solution, hints, pred_first_wrong_step=wrong_step, pred_misconception=misconception)
-
-
-def _not_delivered(result) -> dict:
-    no_reply = all(r == verification.NOT_JSON for r in result.reasons)
-    return _outcome("parse_error" if no_reply else "abstained", retries=result.retries,
-                    verify_reasons=result.reasons, unchecked_steps=result.unchecked_steps,
-                    weak_steps=result.weak_steps)
 
 
 def _llm_verified(problem: dict, taxonomy: list) -> dict:
     result = verification.solve_checked(problem, lambda s: llm_verifier.check_solution(problem, s))
     if not result.verified:
-        return _not_delivered(result)
+        no_reply = all(r == verification.NOT_JSON for r in result.reasons)
+        return _outcome("parse_error" if no_reply else "abstained", retries=result.retries,
+                        verify_reasons=result.reasons)
     solution = result.solution
     wrong_step, misconception = _diagnose(problem, taxonomy, solution)
 
-    def reject(text, claims):
-        return llm_verifier.check_hint(problem, solution, text, claims)
+    def review(text, claims):
+        return llm_verifier.check_hint(problem, solution, text, claims), {}
 
-    hints = hint.make_hints(problem, solution, misconception, wrong_step, reject=reject)
+    hints = hint.make_hints(problem, solution, misconception, wrong_step, review=review) if hints_wanted(problem) else []
     return _outcome("answered", solution, hints, retries=result.retries, verify_reasons=result.reasons,
                     pred_first_wrong_step=wrong_step, pred_misconception=misconception)
 
@@ -138,9 +149,10 @@ def _student_check_steps(problem: dict) -> list:
 
 
 def _ours(problem: dict, taxonomy: list, options: Options) -> dict:
-    result = verification.solve_verified(problem, options.verify_mode)
-    if not result.verified:
-        return _not_delivered(result)
+    result = verification.solve_flagged(problem, options.verify_mode)
+    if result.solution is None:
+        return _outcome("parse_error", retries=result.retries, verify_reasons=result.reasons)
+    delivered = result.delivered()
     misconception = wrong_step = None
     if problem.get("student_steps"):
         reason = None
@@ -150,15 +162,20 @@ def _ours(problem: dict, taxonomy: list, options: Options) -> dict:
                 wrong_step = problem["student_steps"][report.first_bad]["step_no"]
                 reason = f"step {wrong_step}: {report.reason}"
         if options.use_diagnostic and (wrong_step is not None or options.verify_mode != "steps"):
-            found = diagnostic.diagnose(problem, taxonomy, P.compact(result.solution), reason)
+            found = diagnostic.diagnose(problem, taxonomy, P.compact(delivered), reason)
             misconception = found["misconception"]
             if options.verify_mode != "steps":
                 wrong_step = found["first_wrong_step"]
-    hints = hint.make_hints(problem, result.solution, misconception, wrong_step,
-                            reject=hint.certificate_rejection(problem, result.solution),
-                            graded=options.graded_hints)
-    return _outcome("answered", result.solution, hints, retries=result.retries, verify_reasons=result.reasons,
-                    unchecked_steps=result.unchecked_steps, weak_steps=result.weak_steps,
+    hints = []
+    if hints_wanted(problem):
+        certified = delivered["answer"] if result.answer_flag == verification.CERTIFIED else None
+        review = hint.certificate_review(problem, [certified, compute_answer(problem["topic"], problem)])
+        hints = hint.make_hints(problem, delivered, misconception, wrong_step, review=review,
+                                graded=options.graded_hints)
+    status = "answer_withheld" if result.answer_flag == verification.WITHHELD else "answered"
+    return _outcome(status, result.solution, hints, retries=result.retries, verify_reasons=result.reasons,
+                    step_flags=result.step_flags, answer_flag=result.answer_flag,
+                    unchecked_steps=result.step_flags.count(verification.UNVERIFIED),
                     pred_first_wrong_step=wrong_step, pred_misconception=misconception)
 
 

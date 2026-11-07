@@ -60,7 +60,7 @@
 - No usable D1 results for ['B2', 'B3', 'B4', 'OURS'].
 - Systems are NOT comparable here: API errors removed problems unevenly {'B1': 4, 'B2': 3, 'B3': 3, 'B4': 3, 'OURS': 3}. Rerun to fill them in.
 - Share of responses with at least 1 delivered claim that contradicts the ground truth, graded by grader.py and never by the verifier. Mean, SD and range are over runs; the 95% CI comes from a bootstrap of 10000 resamples clustered by problem.
-- A response that abstains or gives no usable reply delivers no claims, so it cannot be wrong. Read this with the abstention rate in T3b.
+- Only delivered claims count: OURS withholds refuted claims. A response that abstains or gives no usable reply delivers no claims, so it cannot be wrong. Read this with the abstention and answer-withheld rates in T3b.
 - The human audit of 10% of claim extractions (PREREGISTRATION.md s3) has not been done.
 
 ## T3d. RQ4 certified-claim coverage (OURS)
@@ -68,14 +68,14 @@
 | topic | size | responses | claims | certified_coverage | ci95_low | ci95_high | decidable_share | weakly_checked_share |
 |---|---|---|---|---|---|---|---|---|
 
-- Certified claims / all extracted claims in the delivered version, from the verifier. A row operation is certified only if applying its stated operation reproduces the next matrix exactly. Claims that pass on row-equivalence alone are weakly checked: they never count as certified, and are reported separately. Decidable share is (certified + refuted) / all.
+- Certified claims / all extracted claims in the final version of each response, withheld claims included, as registered. A row operation is certified only if applying its stated operation reproduces the next matrix exactly. Claims that pass on row-equivalence alone are weakly checked: they never count as certified, and are reported separately. Decidable share is (certified + refuted) / all.
 - Blank if OURS has not been run. Coverage of student steps (prereg-v1 T3) needs D3.
 
 ## T3b. Wrong answers, fabricated answers and abstention
 
-| system | n | api_errors_excluded | answered | wrong_delivered_rate | consistent_computation_error_rate | fabricated_rate | abstention_rate | no_parseable_reply | accuracy_when_answered |
-|---|---|---|---|---|---|---|---|---|---|
-| B1 | 6 | 4 | 6 | 0.167 (1/6) | 0.167 (1/6) | 0.000 (0/2) | 0.000 (0/6) | 0 | 0.833 (5/6) |
+| system | n | api_errors_excluded | answered | wrong_delivered_rate | consistent_computation_error_rate | fabricated_rate | abstention_rate | answer_withheld_rate | no_parseable_reply | accuracy_when_answered |
+|---|---|---|---|---|---|---|---|---|---|---|
+| B1 | 6 | 4 | 6 | 0.167 (1/6) | 0.167 (1/6) | 0.000 (0/2) | 0.000 (0/6) | 0.000 (0/6) | 0 | 0.833 (5/6) |
 
 - Consistent computation error: wrong, but the response's own working arrives at it. Over all problems.
 - Fabricated: wrong, not derived from the working (none shown, or it differs from the last value the working computes), and passes the surface check. Over eigenpairs and diagonalisation only: eigenvalues must sum to trace(A), or trace(D) must equal trace(A).
@@ -118,11 +118,11 @@
 
 ## T5. Hint leak rate and hint-verified rate
 
-| system | hints_delivered | hints_withheld | leak_rate | verified_rate | verified_with_certified_claim |
-|---|---|---|---|---|---|
-| B1 | 18 | 0 | 0.000 (0/18) | 0.889 (16/18) | 0.389 (7/18) |
+| system | hints_delivered | hints_withheld | leak_rate | verified_rate | verified_with_certified_claim | delivered_with_unverified_flag |
+|---|---|---|---|---|---|---|
+| B1 | 18 | 0 | 0.000 (0/18) | 0.889 (16/18) | 0.389 (7/18) | 0.000 (0/18) |
 
-- Both rates are over delivered hints, measured by the same checks for every system. Leaks are checked against the stored ground truth. B1, B2 and B3 are measured but never filtered. A hint with no computed values counts as verified, so the last column shows how many passed with at least one certified claim, i.e. checked mathematics rather than a vacuous pass.
+- D1 hints are exploratory and counted in run 1 only. Both rates are over delivered hints, measured by the same checks for every system. Leaks are checked against the stored ground truth. B1, B2 and B3 are measured but never filtered. A hint with no computed values counts as verified, so the last column shows how many passed with at least one certified claim, i.e. checked mathematics rather than a vacuous pass.
 
 ## T6. Ablations (D1)
 

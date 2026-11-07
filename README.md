@@ -14,7 +14,7 @@ The current code is at the repository root: `run.py`, `batch.py`, `score.py`, `s
 
 ## Earlier code (added 1 Nov 2026, before any LLM run)
 
-This code is kept for the record. It no longer produces results, except `latutor/stats.py`, which `score.py` uses.
+This code is kept for the record. It no longer produces results, except `latutor/stats.py`, which `score.py` still uses for McNemar, the odds ratio, Holm and the bootstrap.
 
 | Path | What it is |
 |---|---|
