@@ -303,25 +303,14 @@ def test_holm_by_hand():
     assert out == pytest.approx({"d": 0.02, "a": 0.03, "c": 0.06, "b": 0.06})
 
 
-def test_holm_across_all_eight_by_hand():
-    # Model 1: 0.001, 0.02, 0.03, 0.04. Model 2: 0.002, 0.03, 0.05, 0.5.
-    # Sorted 0.001, 0.002, 0.02, 0.03, 0.03, 0.04, 0.05, 0.5
-    # times  8,     7,     6,    5,    4,    3,    2,    1
-    # gives  0.008, 0.014, 0.12, 0.15, 0.12, 0.12, 0.10, 0.5. Running maximum: the last five are 0.15, 0.15, 0.15, 0.15, 0.5.
-    ps = {"m1": [0.001, 0.02, 0.03, 0.04], "m2": [0.002, 0.03, 0.05, 0.5]}
-    primaries = {tag: {("RQ1", f"c{i}"): {"p": p} for i, p in enumerate(values)} for tag, values in ps.items()}
-    table, notes = score.t8b_all_comparisons(primaries)
-    got = {(r.model, r.comparison): r.holm_p_across_8 for r in table.itertuples()}
-    assert got[("m1", "c0")] == "0.0080" and got[("m2", "c0")] == "0.0140"
-    assert got[("m1", "c1")] == "0.1200"
-    assert got[("m2", "c1")] == got[("m1", "c2")] == got[("m1", "c3")] == got[("m2", "c2")] == "0.1500"
-    assert got[("m2", "c3")] == "0.5000"
+def test_there_is_no_across_8_table_any_more():
+    assert not hasattr(score, "t8b_all_comparisons")
 
 
-def test_holm_across_eight_is_blank_with_one_model():
-    primaries = {"m1": {("RQ1", f"c{i}"): {"p": 0.01} for i in range(4)}}
-    table, notes = score.t8b_all_comparisons(primaries)
-    assert (table["holm_p_across_8"] == "").all() and any("blank" in n for n in notes)
+def test_only_the_groq_model_is_scored(tmp_path):
+    for tag in ("groq__openai-gpt-oss-120b", "gemini__gemini-3.8-flash"):
+        (tmp_path / f"B1_d1_dev_run1__{tag}.csv").write_text("problem_id\n", encoding="utf-8")
+    assert score.model_tags("dev", tmp_path) == ["groq__openai-gpt-oss-120b"]
 
 
 def test_holm_needs_all_four_registered_comparisons():
@@ -492,10 +481,30 @@ def test_usd_by_hand():
 
 
 def test_design_tokens_by_hand():
-    # One system, OURS, with 1 input and 10 output per problem on D1 and on D2.
-    # D1 270 x 3 = 810. D2 210 x 3 = 630. Ablations 2 x 810 = 1620. Sum 3060 problem-runs.
-    out = cost_probe.design_tokens({"OURS": (1, 10)}, {"OURS": (1, 10)})
-    assert out == {"input": 3060, "output": 30600}
+    # OURS on D1: run 1 costs (10 in, 100 out); later runs without hints cost (4, 40).
+    # D1 = 270 x (10 + 2 x 4) = 4,860 in and 270 x (100 + 2 x 40) = 48,600 out.
+    # D2 = 210 x 3 x (1, 10) = 630 in and 6,300 out. Ablations = 2 x D1 = 9,720 in and 97,200 out.
+    # Totals: 4,860 + 630 + 9,720 = 15,210 in; 48,600 + 6,300 + 97,200 = 152,100 out.
+    d1 = {"OURS": {"run1": (10, 100), "later": (4, 40)}}
+    d2 = {"OURS": {"run1": (1, 10), "later": (1, 10)}}
+    out = cost_probe.design_tokens(d1, d2)
+    assert (out["input"], out["output"]) == (15210, 152100)
+
+
+def test_per_problem_takes_hint_calls_out_of_later_runs():
+    frame = pd.DataFrame([{"status": "answered", "topic": "determinant", "size": 3, "live_input_tokens": 10,
+                           "live_output_tokens": 100, "live_hint_input_tokens": 6, "live_hint_output_tokens": 60}])
+    rates = cost_probe.per_problem({"OURS": frame})["OURS"]
+    assert rates == {"run1": (10.0, 100.0), "later": (4.0, 40.0)}
+
+
+def test_hint_calls_are_counted_separately():
+    calls = [{"cached": False, "role": "solver", "prompt_tokens": 5, "total_tokens": 50},
+             {"cached": False, "role": "hint", "prompt_tokens": 7, "total_tokens": 20},
+             {"cached": False, "role": "hint_verifier", "prompt_tokens": 3, "total_tokens": 10},
+             {"cached": True, "role": "hint", "prompt_tokens": 9, "total_tokens": 99}]
+    usage = run._usage(calls)
+    assert (usage["live_hint_input_tokens"], usage["live_hint_output_tokens"]) == (10, 20)  # (20-7) + (10-3)
 
 
 # ---- decision of 2026-11-07: OURS withholds only refuted claims

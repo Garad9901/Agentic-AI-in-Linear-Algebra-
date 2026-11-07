@@ -26,4 +26,4 @@ def check_solution(problem: dict, solution):
 def check_hint(problem: dict, solution: dict, text: str, claims: list) -> str | None:
     if not text.strip():
         return "the hint was empty"
-    return _reason(ask_json("llm_verifier", P.llm_verify_hint(problem, solution, text, claims)))
+    return _reason(ask_json("hint_verifier", P.llm_verify_hint(problem, solution, text, claims)))

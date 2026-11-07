@@ -461,7 +461,8 @@ def test_b2_llm_verifier_can_approve_a_wrong_answer(monkeypatch):
     roles = script(monkeypatch, [BAD, JUDGE_OK, NO_LEAK, JUDGE_OK, NO_LEAK, JUDGE_OK, NO_LEAK, JUDGE_OK])
     out = run_system("B2", P, [])
     assert out["status"] == "answered" and out["answer"] == {"determinant": 10}
-    assert roles[:2] == ["solver", "llm_verifier"] and roles.count("llm_verifier") == 4
+    assert roles[:2] == ["solver", "llm_verifier"] and roles.count("llm_verifier") == 1
+    assert roles.count("hint_verifier") == 3  # judging hints is its own role, so its cost can be separated
 
 
 def test_b2_rejection_retries_then_abstains(monkeypatch):

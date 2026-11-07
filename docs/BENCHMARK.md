@@ -23,10 +23,10 @@ python -m pytest -q
 ```powershell
 python run.py --provider groq --system OURS --dataset d1 --split dev --run 1 --limit 20 --workers 4
 python score.py --split dev
-python scripts/cost_probe.py --provider groq
+python scripts/cost_probe.py
 ```
 
-Gemini Batch mode has the same rows and no latency. Rerun the same command to resume after a crash or sleep:
+All reported results come from one model: Groq `openai/gpt-oss-120b` (decision of 2026-11-07). The Gemini provider and Batch mode stay in the repository but produce no reported results, and `score.py` only scores Groq rows. For reference, Batch mode writes the same rows, with no latency, and resumes when the same command is rerun:
 
 ```powershell
 python run.py --provider gemini --batch --system OURS --dataset d1 --split dev --run 1
@@ -101,7 +101,7 @@ The rest of `latutor/` and the older scripts are kept for the record, but they n
 
 - **RQ1 wrong-claim rate** (T2b): the share of responses with at least 1 delivered claim that contradicts the ground truth, graded by `grader.py`. Reported as mean, SD and range over runs with a clustered bootstrap CI. A response that abstains delivers no claims, so read it with the abstention rate.
 - **RQ4 coverage** (T3d): certified claims / all extracted claims in what OURS delivers, from the verifier. The decidable share adds refuted claims. A row operation is certified only if applying its stated operation reproduces the next matrix exactly. Claims that pass on row-equivalence alone are reported as `weakly_checked_share` and never count as certified.
-- **Primary tests** (T8): McNemar, exact when discordant pairs < 25, on the per-item majority of 3 runs, with Holm across the 4 registered comparisons in each model. Per-run tests are a sensitivity analysis, and so is Holm across all 8 comparisons (T8b).
+- **Primary tests** (T8): McNemar, exact when discordant pairs < 25, on the per-item majority of 3 runs, with Holm across the 4 registered comparisons. Per-run tests are a sensitivity analysis. With one model family, there is no cross-model family.
 - **Accuracy** is correct / all problems, so an abstention counts as not correct. T3b also gives accuracy when answered.
 - **Consistent computation error**: wrong, but the response's own working arrives at it.
 - **Fabricated**: wrong, not derived from the working (none shown, or it differs from the last value the working computes), and passes a surface check: eigenvalues sum to trace(A) for eigenpairs, trace(D) == trace(A) for diagonalisation. Other topics report n/a.

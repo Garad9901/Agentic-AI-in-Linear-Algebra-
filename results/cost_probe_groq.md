@@ -12,6 +12,6 @@ Provider groq, model openai/gpt-oss-120b, D1 dev, run 1.
 | B4 | 0 | 3 |  |  |  |  |  |  |  |
 | OURS | 0 | 3 |  |  |  |  |  |  |  |
 
-## Extrapolation
+## Projection for the full run
 
-Blank: it needs all 5 Groq systems on all 20 problems, and this probe did not finish. Extrapolating from what did finish would not be a measurement.
+Blank: it needs all 5 systems on all 20 problems, and this probe did not finish. Projecting from what did finish would not be a measurement.

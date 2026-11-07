@@ -144,7 +144,7 @@
 | B1 | 6 | 1.00 | 710 | 7030 | 15.29 | 0 | 2 |
 
 - Calls, tokens and latency are those of the original API call, so cached reruns report the same cost. Seconds are the latency of the successful API call plus local compute. Pacing and rate-limit waits are excluded.
-- Batch runs record no latency, so T7 seconds come only from Groq synchronous runs. They are blank for Gemini Batch runs.
+- Seconds come from Groq synchronous runs. Batch runs record no latency.
 - Output tokens are all tokens except the prompt, so they include thinking.
 
 ## T7b. Truncation rate by system and size
@@ -168,6 +168,7 @@
 | RQ1 | OURS vs B3 | majority |  |  |  |  |  |  |  |  |  |
 | RQ2 | OURS vs DET | majority |  |  |  |  |  |  |  |  |  |
 
+- One model family only (decision of 2026-11-07), so the family is the 4 registered comparisons.
 - Primary pairing is per-item majority: an event in at least 2 of 3 runs. It stays blank until both systems have all 3 runs. Per-run rows are the sensitivity analysis and take no correction.
 - s0_only and baseline_only are the discordant pairs. Odds ratio is s0_only / baseline_only, with an exact 95% CI, so below 1 favours OURS.
 - holm_p is blank: Holm runs across all 4 registered comparisons, and at least one has no majority p-value yet. RQ2 needs D3.

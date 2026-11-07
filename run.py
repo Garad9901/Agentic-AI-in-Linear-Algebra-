@@ -39,6 +39,7 @@ MODELS = ROOT / "config" / "models.yaml"
 RUNS = [1, 2, 3]
 ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
 MAX_CONSECUTIVE_API_ERRORS = 3
+HINT_ROLES = ("hint", "hint_verifier")  # separate agent calls; B1 and B3 write hints inside their one reply
 
 
 def round_robin(problems: list[dict]) -> list[dict]:
@@ -116,6 +117,8 @@ def _usage(calls: list[dict]) -> dict:
         "output_tokens": sum(_output_tokens(c) for c in calls),
         "live_input_tokens": sum(c.get("prompt_tokens") or 0 for c in live),
         "live_output_tokens": sum(_output_tokens(c) for c in live),
+        "live_hint_input_tokens": sum(c.get("prompt_tokens") or 0 for c in live if c.get("role") in HINT_ROLES),
+        "live_hint_output_tokens": sum(_output_tokens(c) for c in live if c.get("role") in HINT_ROLES),
         "parse_failures": sum(bool(c.get("parse_failed")) for c in calls),
         "truncated_calls": sum(c.get("finish_reason") == "length" for c in calls),
         "llm_seconds": round(sum(c.get("latency_s") or 0 for c in calls), 3),

@@ -7,9 +7,11 @@ model. A cell that cannot be computed stays blank, and the note under the table 
 why. No number here comes from anywhere but a result row or a dataset file.
 
 The pre-registered metrics are RQ1 wrong-claim rate (T2b), RQ4 coverage (T3d) and the
-McNemar tests with Holm correction within each model (T8), with Holm across all 8
-comparisons as a sensitivity analysis (T8b). They use latutor/stats.py and the per-item
-majority rule from docs/DEVIATIONS.md. Claims are graded by grader.py against the
+McNemar tests with Holm correction across the 4 registered comparisons (T8). They use
+latutor/stats.py and the per-item majority rule from docs/DEVIATIONS.md.
+
+All reported results come from one model, the Groq one (decision of 2026-11-07). Results
+from any other provider are not scored. Claims are graded by grader.py against the
 ground truth; RQ4 asks the verifier what it can certify, which is a separate question.
 """
 from __future__ import annotations
@@ -350,7 +352,8 @@ def t8_tests(graded: dict, rq2: dict) -> tuple[pd.DataFrame, list]:
             rows.append(_test_row(key[0], key[1], f"run{run}", res))
     columns = ["rq", "comparison", "pairing", "n_pairs", "s0_only", "baseline_only", "p", "method", "odds_ratio",
                "or_ci_low", "or_ci_high", "holm_p"]
-    notes = ["Primary pairing is per-item majority: an event in at least 2 of 3 runs. It stays blank until both "
+    notes = ["One model family only (decision of 2026-11-07), so the family is the 4 registered comparisons.",
+             "Primary pairing is per-item majority: an event in at least 2 of 3 runs. It stays blank until both "
              "systems have all 3 runs. Per-run rows are the sensitivity analysis and take no correction.",
              "s0_only and baseline_only are the discordant pairs. Odds ratio is s0_only / baseline_only, with an "
              "exact 95% CI, so below 1 favours OURS."]
@@ -358,19 +361,6 @@ def t8_tests(graded: dict, rq2: dict) -> tuple[pd.DataFrame, list]:
         notes.append("holm_p is blank: Holm runs across all 4 registered comparisons, and at least one has no "
                      "majority p-value yet. RQ2 needs D3.")
     return pd.DataFrame(rows, columns=columns, dtype=object).fillna(""), notes
-
-
-def t8b_all_comparisons(primaries: dict, models: int = 2) -> tuple[pd.DataFrame, list]:
-    """Sensitivity analysis: Holm across the 4 comparisons of both models, 8 in all."""
-    pooled = {(tag, *key): result for tag, family in primaries.items() for key, result in family.items()}
-    adjusted = holm_family(pooled, 4 * models)
-    rows = [{"model": key[0], "rq": key[1], "comparison": key[2], "p": _num(result["p"], 4) if result else "",
-             "holm_p_across_8": adjusted.get(key, "")} for key, result in pooled.items()]
-    notes = ["Sensitivity analysis only. The registered family is the 4 comparisons within each model (T8)."]
-    if not adjusted:
-        notes.append("holm_p_across_8 is blank until both models have majority p-values for all 4 comparisons.")
-    columns = ["model", "rq", "comparison", "p", "holm_p_across_8"]
-    return pd.DataFrame(rows, columns=columns), notes
 
 
 def rq2_frames(d3: dict, gold: dict) -> dict:
@@ -593,12 +583,15 @@ def markdown(frame: pd.DataFrame) -> str:
     return "\n".join([head, rule, *body])
 
 
+REPORTED_PROVIDER = "groq"
+
+
 def model_tags(split: str, results: Path = RESULTS) -> list:
-    return sorted({key[2] for key in load_results(split, results)})
+    """Only the reported model. The Gemini code stays, but produces no reported results."""
+    return sorted({key[2] for key in load_results(split, results) if key[2].startswith(f"{REPORTED_PROVIDER}__")})
 
 
-def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap: int = BOOTSTRAP,
-          primaries: dict | None = None) -> list:
+def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap: int = BOOTSTRAP) -> list:
     problems = gen_d1.load()
     by_id = {p["id"]: p for p in problems}
     loaded = load_results(split, results)
@@ -678,8 +671,7 @@ def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap
     tables.append(("T7", "Mean cost per problem", t7_cost(graded, base), [
         "Calls, tokens and latency are those of the original API call, so cached reruns report the same cost. "
         "Seconds are the latency of the successful API call plus local compute. Pacing and rate-limit waits are excluded.",
-        "Batch runs record no latency, so T7 seconds come only from Groq synchronous runs. They are blank for "
-        "Gemini Batch runs.",
+        "Seconds come only from Groq synchronous runs; batch runs record no latency.",
         "Output tokens are all tokens except the prompt, so they include thinking.",
     ]))
     frame, notes = t7b_truncation(graded, base)
@@ -687,8 +679,6 @@ def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap
     rq2 = rq2_frames(d3, d3_data.gold_labels(d3_frame)[0]) if d3_frame is not None and d3 else {}
     frame, notes = t8_tests(graded, rq2)
     tables.append(("T8", "McNemar tests with Holm correction (primary family)", frame, notes))
-    if primaries is not None:
-        primaries[tag] = primary_results(graded, rq2)[0]
     return tables
 
 
@@ -708,16 +698,11 @@ def main() -> None:
     ap.add_argument("--split", choices=["dev", "test"], default="dev")
     args = ap.parse_args()
     tags = model_tags(args.split) or [None]
-    primaries: dict = {}
     for tag in tags:
         out = RESULTS / "tables" / args.split / (tag or "no_results")
-        write(build(args.split, tag, primaries=primaries), out)
+        write(build(args.split, tag), out)
         print(f"# {tag or 'no results'}\n")
         print((out / "tables.md").read_text(encoding="utf-8"))
-    frame, notes = t8b_all_comparisons(primaries)
-    out = RESULTS / "tables" / args.split
-    write([("T8b", "Holm across all 8 comparisons (sensitivity)", frame, notes)], out)
-    print(markdown(frame))
 
 
 if __name__ == "__main__":
