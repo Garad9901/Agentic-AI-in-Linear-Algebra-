@@ -1,0 +1,10 @@
+dataset,topic,size_3,size_4,size_5,dev,test,total
+D1,rref_rank,15,15,15,9,36,45
+D1,determinant,15,15,15,9,36,45
+D1,inverse,15,15,15,9,36,45
+D1,eigenpairs,15,15,15,9,36,45
+D1,diagonalisation,15,15,15,9,36,45
+D1,least_squares,15,15,15,9,36,45
+D2,determinant,50,50,50,30,120,150
+D2,rref_rank,20,20,20,12,48,60
+D3,all,,,,,,

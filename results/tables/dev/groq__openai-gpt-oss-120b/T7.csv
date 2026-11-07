@@ -1,0 +1,2 @@
+system,problems,mean_llm_calls,mean_input_tokens,mean_output_tokens,mean_seconds,parse_failures,rate_limit_retries
+B1,6,1.00,710,7030,15.29,0,2

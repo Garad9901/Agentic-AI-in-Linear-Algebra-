@@ -10,21 +10,31 @@ No number in any table comes from anywhere but a real model reply, a dataset fil
 py -3.10 -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-Copy-Item .env.example .env          # provider and model; the key comes from GEMINI_API_KEY
+Copy-Item .env.example .env          # GROQ_API_KEY and GEMINI_API_KEY
 python data/gen_d1.py                # 270 problems, seed 20261024
 python data/gen_d2.py                # LinAlg-Bench, pinned revision
 python -m pytest -q
 ```
 
-`.env` is git-ignored. The runner refuses any model that is not listed in `config/models.yaml` (tag `models-v1`).
+`.env` is git-ignored. `--provider` chooses the provider, and the model always comes from `config/models.yaml` (tag `models-v1`).
 
 ## Dev split
 
 ```powershell
-python run.py --system OURS --dataset d1 --split dev --run 1 --limit 20
+python run.py --provider groq --system OURS --dataset d1 --split dev --run 1 --limit 20 --workers 4
 python score.py --split dev
-python scripts/cost_probe.py
+python scripts/cost_probe.py --provider groq
 ```
+
+Gemini Batch mode has the same rows and no latency. Rerun the same command to resume after a crash or sleep:
+
+```powershell
+python run.py --provider gemini --batch --system OURS --dataset d1 --split dev --run 1
+```
+
+The Batch API answers only the calls it is given, and the agents make calls in sequence, so a batch run works in rounds: see `batch.py`. Each round can take up to 24 hours. A job left over 48 hours expires, and its requests are submitted again.
+
+Result files are named `<system>_<dataset>_<split>_run<k>__<provider>__<model>.csv`, and `score.py` writes one folder of tables per model.
 
 `--system` takes B1, B2, B3, B4, OURS, A1 to A4, and DET (D3 only). `--dataset` takes d1, d2 or d3. `--run` takes 1, 2 or 3.
 
@@ -34,15 +44,17 @@ Tune `agents/prompts.py` on the dev split only.
 
 ## Test split
 
-`run.py` refuses the test split until a file named `FROZEN` exists. **Do not create it yet.** First resolve every row marked pending in [DEVIATIONS.md](DEVIATIONS.md). In particular, `score.py` does not yet compute the pre-registered wrong-claim rate, RQ4 coverage or statistics.
+`run.py` refuses the test split until a file named `FROZEN` exists. **Do not create it yet.** First resolve every row marked pending in [DEVIATIONS.md](DEVIATIONS.md).
 
-Every response is cached under `cache/` by (model, prompt, run), so rerunning a stopped command resumes at no API cost, and each run still gets a fresh response. Every call is logged to `logs/calls.jsonl`, and every completed command to `results/RUN_INFO.md`.
+Every response is cached under `cache/` by (provider, model, run, prompt hash), so rerunning a stopped command resumes at no API cost, and each run still gets a fresh response. Every call is logged to `logs/calls.jsonl`, and every completed command to `results/RUN_INFO.md`.
 
 ## Layout
 
 | Path | What it is |
 |---|---|
 | `llm.py` | `call_llm(role, prompt)`: temperature 0.7, disk cache, backoff, logging |
+| `batch.py` | Gemini Batch API rounds, with resume |
+| `extraction.py` | Turns a response into the claims it makes, for RQ1 and RQ4 |
 | `data/gen_d1.py`, `data/gen_d2.py` | Build `data/d1.jsonl` and `data/d2.jsonl` |
 | `data/SOURCES.md` | Source, version and licence of each dataset |
 | `d3.py` | Loads student data from `data/private/d3.csv` |
@@ -53,10 +65,11 @@ Every response is cached under `cache/` by (model, prompt, run), so rerunning a 
 | `agents/` | Solver, Verification, LLM verifier, Diagnostic, Hint, JSON parser, prompts |
 | `systems.py` | All systems and ablations |
 | `grader.py` | Grades against stored ground truth; independent of the certificates |
-| `run.py`, `score.py` | Runner and tables T1 to T7 |
+| `run.py`, `score.py` | Runner, and tables T1 to T8 |
+| `latutor/stats.py` | McNemar, odds ratio, Holm, bootstrap. Still in use by `score.py` |
 | `scripts/cost_probe.py` | Cost summary and extrapolation |
 
-`latutor/` and the older scripts are kept for the record, but they no longer produce results.
+The rest of `latutor/` and the older scripts are kept for the record, but they no longer produce results.
 
 ## Systems
 
@@ -75,6 +88,9 @@ Every response is cached under `cache/` by (model, prompt, run), so rerunning a 
 
 ## Definitions
 
+- **RQ1 wrong-claim rate** (T2b): the share of responses with at least 1 delivered claim that contradicts the ground truth, graded by `grader.py`. Reported as mean, SD and range over runs with a clustered bootstrap CI. A response that abstains delivers no claims, so read it with the abstention rate.
+- **RQ4 coverage** (T3d): certified claims / all extracted claims in what OURS delivers, from the verifier. The decidable share adds refuted claims. Claims that pass only on row-equivalence count as certified, and `weak_share` shows how many.
+- **Primary tests** (T8): McNemar, exact when discordant pairs < 25, on the per-item majority of 3 runs, with Holm across the 4 registered comparisons in each model. Per-run tests are the sensitivity analysis.
 - **Accuracy** is correct / all problems, so an abstention counts as not correct. T3b also gives accuracy when answered.
 - **Consistent computation error**: wrong, but the response's own working arrives at it.
 - **Fabricated**: wrong, not derived from the working (none shown, or it differs from the last value the working computes), and passes a surface check: eigenvalues sum to trace(A) for eigenpairs, trace(D) == trace(A) for diagonalisation. Other topics report n/a.

@@ -2,9 +2,14 @@
 
   python score.py --split dev
 
-Writes results/tables/<split>/T*.csv and tables.md. A cell that cannot be
-computed stays blank, and the note under the table says why. No number here
-comes from anywhere but a result row or a dataset file.
+Writes results/tables/<split>/<provider>__<model>/T*.csv and tables.md, one folder per
+model. A cell that cannot be computed stays blank, and the note under the table says
+why. No number here comes from anywhere but a result row or a dataset file.
+
+The pre-registered metrics are RQ1 wrong-claim rate (T2b), RQ4 coverage (T3d) and the
+McNemar tests with Holm correction (T8). They use latutor/stats.py and the per-item
+majority rule from docs/DEVIATIONS.md. Claims are graded by grader.py against the
+ground truth; RQ4 asks the verifier what it can certify, which is a separate question.
 """
 from __future__ import annotations
 
@@ -18,12 +23,20 @@ import pandas as pd
 import d3 as d3_data
 import grader
 from data import gen_d1, gen_d2
-from run import RESULTS
+from extraction import extract
+from latutor.stats import cluster_bootstrap, holm, mcnemar, mean_sd
+from run import RESULTS, RUNS
 from systems import ABLATIONS, SYSTEMS
-from verifier import leak_check, verify_hint
+from verifier import check_claim, leak_check, step_statuses, verify, verify_hint
 
 TOPICS = gen_d1.TOPICS
 SIZES = gen_d1.SIZES
+S0 = "OURS"  # S0 in prereg-v1
+RQ1_BASELINES = ["B1", "B2", "B3"]
+RQ2_BASELINE = "DET"  # B4 in prereg-v1
+MIN_RUNS_AGREEING = 2  # per-item majority: an event in >= 2 of 3 runs
+BOOTSTRAP = 10_000
+TRUNCATION_FLAG = 0.01  # above this, truncation may be distorting results
 
 
 # ---------------------------------------------------------------- metrics
@@ -79,17 +92,20 @@ def step_counts(gold_labels: dict, predicted_first) -> tuple[int, int, int]:
 
 # ---------------------------------------------------------------- loading
 def parse_name(path: Path, split: str):
-    """results/<system>_<dataset>_<split>_run<k>.csv -> (system, dataset)."""
-    parts = path.stem.split("_")
-    if len(parts) != 4 or parts[2] != split or parts[1] not in ("d1", "d2", "d3") or not parts[3].startswith("run"):
+    """<system>_<dataset>_<split>_run<k>__<provider>__<model>.csv -> (system, dataset, "provider__model")."""
+    head, _, tag = path.stem.partition("__")
+    parts = head.split("_")
+    if not tag or len(parts) != 4 or parts[2] != split or parts[1] not in ("d1", "d2", "d3"):
         return None
-    return parts[0], parts[1]
+    if not parts[3].startswith("run"):
+        return None
+    return parts[0], parts[1], tag
 
 
 def load_results(split: str, results: Path = RESULTS) -> dict:
-    """Runs of the same system and dataset are pooled, so counts are over problem x run."""
+    """Keyed by (system, dataset, model tag). Runs are pooled: counts are over problem x run."""
     frames: dict = {}
-    for path in sorted(results.glob(f"*_{split}_run*.csv")):
+    for path in sorted(results.glob(f"*_{split}_run*__*.csv")):
         parsed = parse_name(path, split)
         if parsed:
             frame = pd.read_csv(path, keep_default_na=False, na_values=[""], dtype={"pred_misconception": str})
@@ -101,10 +117,48 @@ def _delivered(row) -> list:
     return [h for h in json.loads(row["hints_json"]) if not h.get("withheld") and h.get("text")]
 
 
+def _final_status(problem: dict, answer) -> str:
+    verdict = verify(problem["topic"], problem, answer)
+    if verdict.ok:
+        return "certified"
+    return "uncheckable" if verdict.reason.startswith("malformed") else "refuted"
+
+
+def _verifier_statuses(problem: dict, claims: list, trace, answer) -> list:
+    """What the Verification Agent says of each claim (RQ4). Never used to grade."""
+    steps = step_statuses(problem["topic"], problem, trace) if isinstance(trace, list) else []
+    statuses = []
+    for item in claims:
+        if item["where"] == "step":
+            statuses.append(steps[item["index"]])
+        elif item["where"] == "final":
+            statuses.append(_final_status(problem, answer))
+        else:
+            statuses.append(check_claim(problem, item["claim"]))
+    return statuses
+
+
+def claim_stats(problem: dict, delivered: bool, trace, answer, hints: list) -> dict:
+    """RQ1 and RQ4 for one response. A response that delivers nothing makes no claims."""
+    claims = extract(problem, trace, answer, hints) if delivered else []
+    grades = [grader.grade_claim(problem, item["claim"]) for item in claims]
+    statuses = _verifier_statuses(problem, claims, trace, answer)
+    return {
+        "n_claims": len(claims),
+        "n_wrong_claims": grades.count("wrong"),
+        "n_unscorable_claims": grades.count("unscorable"),
+        "wrong_claim": int("wrong" in grades),
+        "n_certified": statuses.count("certified") + statuses.count("weak"),
+        "n_weak": statuses.count("weak"),
+        "n_refuted": statuses.count("refuted"),
+    }
+
+
 def grade_d1(frame: pd.DataFrame, problems: dict) -> pd.DataFrame:
     """Add grade columns. api_error rows are dropped: they say nothing about a system."""
     usable = frame[frame["status"] != "api_error"].copy()
     correct, wrong, consistent, fabricated, delivered, leaks, verified, with_claim, n_hints = ([] for _ in range(9))
+    stats = []
     for _, row in usable.iterrows():
         p = problems[row["problem_id"]]
         answer = json.loads(row["answer_json"])
@@ -123,6 +177,9 @@ def grade_d1(frame: pd.DataFrame, problems: dict) -> pd.DataFrame:
         verified.append(sum(c.verified for c in checks))
         with_claim.append(sum(c.verified and c.n_certified > 0 for c in checks))
         n_hints.append(len(hints))
+        stats.append(claim_stats(p, row["status"] == "answered", trace, answer, hints))
+    for column in ("n_claims", "n_wrong_claims", "n_unscorable_claims", "wrong_claim", "n_certified", "n_weak", "n_refuted"):
+        usable[column] = [s[column] for s in stats]
     usable["correct"] = correct
     usable["wrong"] = wrong
     usable["delivered"] = delivered
@@ -149,6 +206,130 @@ def _fabricated_rate(frame: pd.DataFrame) -> str:
     if eligible.empty:
         return "n/a"
     return _ratio(int(eligible["fabricated"].astype(bool).sum()), len(eligible))
+
+
+def rate_row(frame: pd.DataFrame, metric: str, bootstrap: int) -> dict:
+    """Mean +- SD over runs, the range, and a bootstrap CI clustered by problem (prereg-v1 s6)."""
+    rates = frame.groupby("run")[metric].mean().tolist()
+    mean, sd = mean_sd(rates)
+    _, low, high = cluster_bootstrap(frame[metric].tolist(), frame["problem_id"].tolist(), B=bootstrap)
+    return {"problems": frame["problem_id"].nunique(), "runs": len(rates), "mean": _num(mean), "sd": _num(sd),
+            "min_run": _num(min(rates)), "max_run": _num(max(rates)), "ci95_low": _num(low), "ci95_high": _num(high)}
+
+
+def t2b_wrong_claim(graded: dict, names: list, bootstrap: int) -> pd.DataFrame:
+    rows = []
+    for name in names:
+        f = graded[name]
+        rows.append({"system": name, "topic": "all", "size": "all", **rate_row(f, "wrong_claim", bootstrap)})
+        for (topic, size), cell in f.groupby(["topic", "size"], sort=True):
+            rows.append({"system": name, "topic": topic, "size": size, **rate_row(cell, "wrong_claim", bootstrap)})
+    return pd.DataFrame(rows)
+
+
+def coverage_row(frame: pd.DataFrame, bootstrap: int) -> dict:
+    claims = int(frame["n_claims"].sum())
+    if claims == 0:
+        return {"responses": len(frame), "claims": 0}
+    pairs = list(zip(frame["n_certified"].tolist(), frame["n_claims"].tolist()))
+
+    def share(sample):
+        return sum(a for a, _ in sample) / max(sum(b for _, b in sample), 1)
+
+    _, low, high = cluster_bootstrap(pairs, frame["problem_id"].tolist(), stat=share, B=bootstrap)
+    return {"responses": len(frame), "claims": claims,
+            "certified_coverage": _num(frame["n_certified"].sum() / claims),
+            "ci95_low": _num(low), "ci95_high": _num(high),
+            "decidable_share": _num((frame["n_certified"].sum() + frame["n_refuted"].sum()) / claims),
+            "weak_share": _num(frame["n_weak"].sum() / claims)}
+
+
+def t3d_coverage(frame, bootstrap: int) -> pd.DataFrame:
+    columns = ["topic", "size", "responses", "claims", "certified_coverage", "ci95_low", "ci95_high",
+               "decidable_share", "weak_share"]
+    if frame is None:
+        return pd.DataFrame(columns=columns)
+    rows = [{"topic": "all", "size": "all", **coverage_row(frame, bootstrap)}]
+    for (topic, size), cell in frame.groupby(["topic", "size"], sort=True):
+        rows.append({"topic": topic, "size": size, **coverage_row(cell, bootstrap)})
+    return pd.DataFrame(rows, columns=columns, dtype=object).fillna("")
+
+
+def paired_tests(a: pd.DataFrame, b: pd.DataFrame, metric: str) -> tuple:
+    """(majority result or None, {run: result}), each from latutor.stats.mcnemar."""
+    left = a.set_index(["run", "problem_id"])[metric].to_dict()
+    right = b.set_index(["run", "problem_id"])[metric].to_dict()
+    per_run = {}
+    for run in sorted({k[0] for k in left} & {k[0] for k in right}):
+        items = sorted(k[1] for k in left if k[0] == run and k in right)
+        if items:
+            per_run[run] = mcnemar([left[(run, i)] for i in items], [right[(run, i)] for i in items])
+    problems = {k[1] for k in left}
+    complete = sorted(i for i in problems if all((r, i) in left and (r, i) in right for r in RUNS))
+    if not complete:
+        return None, per_run
+    x = [int(sum(left[(r, i)] for r in RUNS) >= MIN_RUNS_AGREEING) for i in complete]
+    y = [int(sum(right[(r, i)] for r in RUNS) >= MIN_RUNS_AGREEING) for i in complete]
+    return mcnemar(x, y), per_run
+
+
+def _test_row(rq: str, comparison: str, pairing: str, result: dict | None, adjusted="") -> dict:
+    row = {"rq": rq, "comparison": comparison, "pairing": pairing}
+    if result:
+        row.update(n_pairs=result["n_pairs"], s0_only=result["b"], baseline_only=result["c"], p=_num(result["p"], 4),
+                   method=result["method"], odds_ratio=_num(result["odds_ratio"]),
+                   or_ci_low=_num(result["or_ci_low"]), or_ci_high=_num(result["or_ci_high"]), holm_p=adjusted)
+    return row
+
+
+def holm_family(primary: dict) -> dict:
+    """Holm over the 4 registered comparisons. Empty unless all 4 have a p-value."""
+    if len(primary) != 4 or any(r is None for r in primary.values()):
+        return {}
+    return {k: _num(v, 4) for k, v in holm({k: r["p"] for k, r in primary.items()}).items()}
+
+
+def t8_tests(graded: dict, rq2: dict) -> tuple[pd.DataFrame, list]:
+    majority, per_run = {}, {}
+    for base in RQ1_BASELINES:
+        key = ("RQ1", f"{S0} vs {base}")
+        if S0 in graded and base in graded:
+            majority[key], per_run[key] = paired_tests(graded[S0], graded[base], "wrong_claim")
+        else:
+            majority[key], per_run[key] = None, {}
+    key = ("RQ2", f"{S0} vs {RQ2_BASELINE}")
+    if S0 in rq2 and RQ2_BASELINE in rq2:
+        majority[key], per_run[key] = paired_tests(rq2[S0], rq2[RQ2_BASELINE], "first_error_wrong")
+    else:
+        majority[key], per_run[key] = None, {}
+    adjusted = holm_family(majority)
+    rows = []
+    for key, result in majority.items():
+        rows.append(_test_row(key[0], key[1], "majority", result, adjusted.get(key, "")))
+        for run, res in per_run[key].items():
+            rows.append(_test_row(key[0], key[1], f"run{run}", res))
+    columns = ["rq", "comparison", "pairing", "n_pairs", "s0_only", "baseline_only", "p", "method", "odds_ratio",
+               "or_ci_low", "or_ci_high", "holm_p"]
+    notes = ["Primary pairing is per-item majority: an event in at least 2 of 3 runs. It stays blank until both "
+             "systems have all 3 runs. Per-run rows are the sensitivity analysis and take no correction.",
+             "s0_only and baseline_only are the discordant pairs. Odds ratio is s0_only / baseline_only, with an "
+             "exact 95% CI, so below 1 favours OURS."]
+    if not adjusted:
+        notes.append("holm_p is blank: Holm runs across all 4 registered comparisons, and at least one has no "
+                     "majority p-value yet. RQ2 needs D3.")
+    return pd.DataFrame(rows, columns=columns, dtype=object).fillna(""), notes
+
+
+def rq2_frames(d3: dict, gold: dict) -> dict:
+    """RQ2 event, on erroneous solutions: the predicted first wrong step is not the gold one."""
+    frames = {}
+    for name, frame in d3.items():
+        erroneous = [sid for sid, g in gold.items() if g["first_error_step"] is not None]
+        f = frame[(frame["status"] != "api_error") & frame["problem_id"].isin(erroneous)].copy()
+        predicted = [None if pd.isna(v) else int(v) for v in f["pred_first_wrong_step"]]
+        f["first_error_wrong"] = [int(p != gold[s]["first_error_step"]) for p, s in zip(predicted, f["problem_id"])]
+        frames[name] = f
+    return frames
 
 
 def t1_dataset(problems: list[dict], d3_frame, d3_note) -> tuple[pd.DataFrame, list]:
@@ -316,14 +497,34 @@ def t7_cost(graded: dict, names: list) -> pd.DataFrame:
     rows = []
     for name in names:
         f = graded[name]
+        sync = f[f["mode"] == "sync"]
         rows.append({
             "system": name,
             "problems": len(f),
             "mean_llm_calls": _num(f["llm_calls"].mean(), 2),
-            "mean_tokens": _num(f["total_tokens"].mean(), 0),
-            "mean_seconds": _num((f["llm_seconds"] + f["local_seconds"]).mean(), 2),
+            "mean_input_tokens": _num(f["input_tokens"].mean(), 0),
+            "mean_output_tokens": _num(f["output_tokens"].mean(), 0),
+            "mean_seconds": _num((sync["llm_seconds"] + sync["local_seconds"]).mean(), 2) if len(sync) else "",
+            "parse_failures": int(f["parse_failures"].sum()),
+            "rate_limit_retries": int(f["rate_limit_errors"].sum()),
         })
     return pd.DataFrame(rows)
+
+
+def t7b_truncation(graded: dict, names: list) -> tuple[pd.DataFrame, list]:
+    rows, flagged = [], []
+    for name in names:
+        f = graded[name]
+        for size in [*SIZES, "all"]:
+            cell = f if size == "all" else f[f["size"] == size]
+            calls, cut = int(cell["llm_calls"].sum()), int(cell["truncated_calls"].sum())
+            rows.append({"system": name, "size": size, "calls": calls, "truncated": cut,
+                         "truncation_rate": _ratio(cut, calls)})
+            if calls and size != "all" and cut / calls > TRUNCATION_FLAG:
+                flagged.append(f"{name} size {size}")
+    notes = [f"A call is truncated if its finish_reason is length. Flag threshold: {TRUNCATION_FLAG:.0%}."]
+    notes.append(f"FLAG: truncation above the threshold in {flagged}." if flagged else "No cell is above the threshold.")
+    return pd.DataFrame(rows), notes
 
 
 # ---------------------------------------------------------------- output
@@ -337,14 +538,19 @@ def markdown(frame: pd.DataFrame) -> str:
     return "\n".join([head, rule, *body])
 
 
-def build(split: str, results: Path = RESULTS) -> list:
+def model_tags(split: str, results: Path = RESULTS) -> list:
+    return sorted({key[2] for key in load_results(split, results)})
+
+
+def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap: int = BOOTSTRAP) -> list:
     problems = gen_d1.load()
     by_id = {p["id"]: p for p in problems}
     loaded = load_results(split, results)
-    d1 = {name: f for (name, ds), f in loaded.items() if ds == "d1"}
-    d3 = {name: f for (name, ds), f in loaded.items() if ds == "d3"}
+    d1 = {name: f for (name, ds, t), f in loaded.items() if ds == "d1" and t == tag}
+    d3 = {name: f for (name, ds, t), f in loaded.items() if ds == "d3" and t == tag}
     graded = {name: grade_d1(f, by_id) for name, f in d1.items()}
-    base = [s for s in SYSTEMS if s in graded]
+    base = [s for s in SYSTEMS if s in graded and not graded[s].empty]
+    graded = {s: f for s, f in graded.items() if not f.empty}
 
     d3_frame, d3_note = None, ""
     try:
@@ -358,13 +564,27 @@ def build(split: str, results: Path = RESULTS) -> list:
     missing = [s for s in SYSTEMS if s not in graded]
     d1_notes = [f"Accuracy is correct / all problems, so an abstention counts as not correct. Split: {split}."]
     if missing:
-        d1_notes.append(f"No D1 results for {missing}.")
-    excluded = {s: int((d1[s]["status"] == "api_error").sum()) for s in base}
+        d1_notes.append(f"No usable D1 results for {missing}.")
+    excluded = {s: int((d1[s]["status"] == "api_error").sum()) for s in d1}
     if any(excluded.values()):
         d1_notes.append(f"Systems are NOT comparable here: API errors removed problems unevenly {excluded}. "
                         "Rerun to fill them in.")
     tables.append(("T2", "Accuracy by topic x system", t2_t3_accuracy(graded, "topic", TOPICS, base), d1_notes))
     tables.append(("T3", "Accuracy by size x system", t2_t3_accuracy(graded, "size", SIZES, base), d1_notes))
+    tables.append(("T2b", "RQ1 wrong-claim rate", t2b_wrong_claim(graded, base, bootstrap), d1_notes[1:] + [
+        "Share of responses with at least 1 delivered claim that contradicts the ground truth, graded by "
+        "grader.py and never by the verifier. Mean, SD and range are over runs; the 95% CI comes from a "
+        f"bootstrap of {bootstrap} resamples clustered by problem.",
+        "A response that abstains or gives no usable reply delivers no claims, so it cannot be wrong. Read this "
+        "with the abstention rate in T3b.",
+        "The human audit of 10% of claim extractions (PREREGISTRATION.md s3) has not been done.",
+    ]))
+    tables.append(("T3d", "RQ4 certified-claim coverage (OURS)", t3d_coverage(graded.get(S0), bootstrap), [
+        "Certified claims / all extracted claims in the delivered version, from the verifier. Decidable share "
+        "is (certified + refuted) / all. Claims that pass only on row-equivalence count as certified; weak_share "
+        "shows how many, because row-equivalence cannot see arithmetic slips on full-rank matrices.",
+        "Blank if OURS has not been run. Coverage of student steps (prereg-v1 T3) needs D3.",
+    ]))
     tables.append(("T3b", "Wrong answers, fabricated answers and abstention", t3b_reliability(graded, base, d1), [
         "Consistent computation error: wrong, but the response's own working arrives at it. Over all problems.",
         "Fabricated: wrong, not derived from the working (none shown, or it differs from the last value the "
@@ -398,7 +618,15 @@ def build(split: str, results: Path = RESULTS) -> list:
     tables.append(("T7", "Mean cost per problem", t7_cost(graded, base), [
         "Calls, tokens and latency are those of the original API call, so cached reruns report the same cost. "
         "Seconds are the latency of the successful API call plus local compute. Pacing and rate-limit waits are excluded.",
+        "Batch runs record no latency, so T7 seconds come only from Groq synchronous runs. They are blank for "
+        "Gemini Batch runs.",
+        "Output tokens are all tokens except the prompt, so they include thinking.",
     ]))
+    frame, notes = t7b_truncation(graded, base)
+    tables.append(("T7b", "Truncation rate by system and size", frame, notes))
+    rq2 = rq2_frames(d3, d3_data.gold_labels(d3_frame)[0]) if d3_frame is not None and d3 else {}
+    frame, notes = t8_tests(graded, rq2)
+    tables.append(("T8", "McNemar tests with Holm correction (primary family)", frame, notes))
     return tables
 
 
@@ -417,9 +645,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Build tables T1 to T7 from result files.")
     ap.add_argument("--split", choices=["dev", "test"], default="dev")
     args = ap.parse_args()
-    out = RESULTS / "tables" / args.split
-    write(build(args.split), out)
-    print((out / "tables.md").read_text(encoding="utf-8"))
+    tags = model_tags(args.split) or [None]
+    for tag in tags:
+        out = RESULTS / "tables" / args.split / (tag or "no_results")
+        write(build(args.split, tag), out)
+        print(f"# {tag or 'no results'}\n")
+        print((out / "tables.md").read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

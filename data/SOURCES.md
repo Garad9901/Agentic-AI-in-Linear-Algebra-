@@ -34,7 +34,7 @@ The dataset's own README names a second repository, `linalgbench2026/LinAlgBench
 
 All 660 problems are in `data/d2.jsonl`. Only 210 are marked `runnable`.
 
-| Task | Problems | Runnable | Why not |
+| Task | Problems | Runnable | Excluded because |
 |---|---:|---:|---|
 | determinant | 150 | 150 | |
 | rank | 60 | 60 | |

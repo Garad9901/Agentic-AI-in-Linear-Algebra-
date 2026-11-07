@@ -33,6 +33,7 @@ _TERM = re.compile(
     + _ROW + r"(?:\s*/\s*(\d+))?\s*")
 _OP_IN_TEXT = re.compile(rf"(?:swap\s+)?{_ROW}\s*(?:<-+>|↔|\\leftrightarrow|{_ARROW}|and\s+{_ROW}).*", re.I)
 _DET_WORD = re.compile(r"\bdet", re.I)
+_BAD_STEP = (ParseError, TypeError, ValueError, KeyError, IndexError)  # model output is untrusted
 
 
 class BadOp(ValueError):
@@ -308,14 +309,17 @@ class _Checker:
             return None
         self.report.unchecked.append(i)
 
+    def dispatch(self):
+        return {"rref_rank": self._rref_rank, "determinant": self._determinant, "inverse": self._inverse,
+                "eigenpairs": self._eigen, "diagonalisation": self._eigen,
+                "least_squares": self._least_squares}[self.topic]
+
     def run(self) -> StepReport:
-        check = {"rref_rank": self._rref_rank, "determinant": self._determinant, "inverse": self._inverse,
-                 "eigenpairs": self._eigen, "diagonalisation": self._eigen,
-                 "least_squares": self._least_squares}[self.topic]
+        check = self.dispatch()
         for i, step in enumerate(self.steps):
             try:
                 reason = _check_expr(step) or check(i, step)
-            except ParseError:
+            except _BAD_STEP:
                 self.report.unchecked.append(i)
                 continue
             if reason:
@@ -323,6 +327,40 @@ class _Checker:
                 self.report.reason = reason
                 return self.report
         return self.report
+
+
+def step_statuses(topic: str, problem: dict, steps: list) -> list:
+    """A status for every step: certified, weak, refuted or uncheckable.
+
+    Unlike check_steps this does not stop at the first bad step. A step after a refuted one
+    is judged as a consequence of that step, as a reader would.
+    """
+    normalised = [normalise_step(s) for s in steps]
+    checker = _Checker(topic, problem, normalised)
+    check = checker.dispatch()
+    refuted = set()
+    for i, step in enumerate(normalised):
+        try:
+            reason = _check_expr(step) or check(i, step)
+        except _BAD_STEP:
+            checker.report.unchecked.append(i)
+            continue
+        if reason:
+            refuted.add(i)
+            try:
+                if "matrix" in step:
+                    checker.prev = mat(step["matrix"])
+            except ParseError:
+                pass
+
+    def status(i):
+        if i in refuted:
+            return "refuted"
+        if i in checker.report.unchecked:
+            return "uncheckable"
+        return "weak" if i in checker.report.weak else "certified"
+
+    return [status(i) for i in range(len(normalised))]
 
 
 def check_steps(topic: str, problem: dict, steps: list) -> StepReport:

@@ -89,7 +89,7 @@ def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("LLM_PROVIDER", "groq")
     monkeypatch.setenv("LLM_MODEL", "test-model")
-    monkeypatch.setenv("LLM_API_KEY", "test-key")
+    monkeypatch.setenv("GROQ_API_KEY", "test-key")
     monkeypatch.setenv("LLM_RPM", "100000")
     sleeps.clear()
     return tmp_path
@@ -187,8 +187,8 @@ def test_each_run_gets_a_fresh_response_and_reruns_are_cached(sandbox, monkeypat
 
 
 def test_cache_key_depends_on_the_run():
-    assert llm.cache_key("m", "p", 1) != llm.cache_key("m", "p", 2)
-    assert llm.cache_key("m", "p", 1) == llm.cache_key("m", "p", 1)
+    assert llm.cache_key("groq", "m", 1, "p") != llm.cache_key("groq", "m", 2, "p")
+    assert llm.cache_key("groq", "m", 1, "p") == llm.cache_key("groq", "m", 1, "p")
 
 
 def test_use_run_restores_the_previous_run():
@@ -520,23 +520,13 @@ def test_test_split_needs_frozen(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("LLM_PROVIDER", "gemini")
     monkeypatch.setenv("LLM_MODEL", "gemini-3.8-flash")
     monkeypatch.setattr(run, "FROZEN", tmp_path / "FROZEN")
-    monkeypatch.setattr(sys, "argv", ["run.py", "--system", "B1", "--dataset", "d1", "--split", "test"])
+    monkeypatch.setattr(sys, "argv", ["run.py", "--provider", "groq", "--system", "B1", "--dataset", "d1", "--split", "test"])
     with pytest.raises(SystemExit, match="FROZEN"):
         run.main()
 
 
-def test_model_must_be_listed_in_models_v1(monkeypatch):
-    assert run.listed_in_models_v1("gemini-3.8-flash")
-    assert not run.listed_in_models_v1("gemini-9-imaginary")
-    monkeypatch.setenv("LLM_PROVIDER", "gemini")
-    monkeypatch.setenv("LLM_MODEL", "gemini-9-imaginary")
-    monkeypatch.setattr(sys, "argv", ["run.py", "--system", "B1", "--dataset", "d1", "--split", "dev"])
-    with pytest.raises(SystemExit, match="models.yaml"):
-        run.main()
-
-
 def test_det_refuses_datasets_without_student_work(monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["run.py", "--system", "DET", "--dataset", "d1", "--split", "dev"])
+    monkeypatch.setattr(sys, "argv", ["run.py", "--provider", "groq", "--system", "DET", "--dataset", "d1", "--split", "dev"])
     with pytest.raises(SystemExit, match="student work"):
         run.main()
 
@@ -718,7 +708,7 @@ def test_gold_needs_agreement_or_a_gold_row():
 
 def test_tables_leave_d3_blank_without_data(tmp_path, monkeypatch):
     monkeypatch.setattr(d3_data, "read_rows", lambda: (_ for _ in ()).throw(d3_data.D3Unavailable("no data yet")))
-    tables = {t[0]: t for t in score.build("dev", tmp_path)}
+    tables = {t[0]: t for t in score.build("dev", None, tmp_path, bootstrap=100)}
     t4 = tables["T4"][2]
     assert t4["first_wrong_step_accuracy"].eq("").all()
     assert any("no data yet" in n for n in tables["T4"][3])
@@ -733,6 +723,7 @@ def test_deviations_state_they_precede_the_test_split():
 
 def test_no_test_split_results_exist():
     assert not list(run.RESULTS.glob("*_test_run*.csv"))
+    assert not list(run.RESULTS.rglob("*_test_run*.csv"))
     assert not run.FROZEN.exists()
 
 

@@ -42,6 +42,14 @@ def _minor(A, c):
     return A.minor_submatrix(i, j).det(method="bareiss"), (-1) ** (i + j)
 
 
+def _shifted(A) -> list:
+    """A - lambda I for each rational eigenvalue, the usual start when finding eigenvectors."""
+    if not A.is_square:
+        return []
+    poly = sp.Poly(A.charpoly(LAM).as_expr(), LAM)
+    return [A - lam * sp.eye(A.rows) for lam in sp.roots(poly, filter="Q")]
+
+
 def _check(A, b, c: dict) -> str:
     t = c.get("type")
     if t == "determinant":
@@ -74,7 +82,7 @@ def _check(A, b, c: dict) -> str:
             starts += [AtA, AtA.row_join(Atb)]
         if c.get("start"):
             start = mat(c["start"])
-            if not any(same_rowspace(s, start) for s in starts):
+            if not any(same_rowspace(s, start) for s in starts + _shifted(A)):
                 return REFUTED  # a start unconnected to the problem certifies nothing
             starts = [start]
         try:

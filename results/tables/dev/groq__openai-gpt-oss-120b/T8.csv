@@ -1,0 +1,5 @@
+rq,comparison,pairing,n_pairs,s0_only,baseline_only,p,method,odds_ratio,or_ci_low,or_ci_high,holm_p
+RQ1,OURS vs B1,majority,,,,,,,,,
+RQ1,OURS vs B2,majority,,,,,,,,,
+RQ1,OURS vs B3,majority,,,,,,,,,
+RQ2,OURS vs DET,majority,,,,,,,,,

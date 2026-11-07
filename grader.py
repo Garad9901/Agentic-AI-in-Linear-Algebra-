@@ -16,9 +16,11 @@ from __future__ import annotations
 
 import sympy as sp
 
-from verifier.exact import ParseError, mat, num, vec
+from verifier.exact import ParseError, evaluate, mat, num, same_rowspace, vec
+from verifier.steps import parse_ops
 
 SURFACE_TOPICS = ("eigenpairs", "diagonalisation")
+LAM = sp.Symbol("lam")
 _READ_ERRORS = (ParseError, KeyError, TypeError, IndexError, AttributeError)
 
 
@@ -151,6 +153,159 @@ def passes_surface_check(problem: dict, answer) -> bool | None:
         return D.is_square and D.trace() == trace_a
     except _READ_ERRORS:
         return False
+
+
+def _apply(M, ops):
+    """Row operations, applied here and not by the verifier, so the two can disagree."""
+    M = M.copy()
+    for op in ops:
+        if op[0] == "swap":
+            M.row_swap(op[1], op[2])
+        else:
+            _, target, terms = op
+            M[target, :] = sum((c * M.row(k) for k, c in terms), sp.zeros(1, M.cols))
+    return M
+
+
+def _text_op(claim: dict):
+    if claim.get("op"):
+        return parse_ops(claim["op"])
+    text = claim.get("text")
+    return parse_ops(text.splitlines()[0]) if isinstance(text, str) and text.strip() else None
+
+
+def _reference(problem: dict, context: str, claim: dict):
+    A = mat(problem["A"])
+    if context == "A":
+        return A
+    if context == "augmented_A_I":
+        return A.row_join(sp.eye(A.rows))
+    if context == "A_minus_lambda_I":
+        return A - num(claim["lambda"]) * sp.eye(A.rows)
+    b = vec(problem["b"])
+    return (A.T * A).row_join(A.T * b)
+
+
+def _grade_intermediate(problem: dict, c: dict):
+    M = mat(c["matrix"])
+    ref = _reference(problem, c["context"], c)
+    if M.shape != ref.shape or not same_rowspace(ref, M):
+        return False
+    ops = _text_op(c)
+    if ops and c["context"] != "A_minus_lambda_I":
+        previous = mat(c["previous"]) if c.get("previous") is not None else ref
+        return _apply(previous, ops) == M
+    return True
+
+
+def _grade_eigenvector(problem: dict, c: dict):
+    spaces = _spaces(problem["ground_truth"])
+    lam, v = num(c["eigenvalue"]), vec(c["vector"])
+    if lam not in spaces:
+        return False
+    basis = spaces[lam]
+    return v.rows == basis[0].rows and v != sp.zeros(v.rows, 1) and _in_span(v, basis)
+
+
+def _charpoly_coefficients(problem: dict) -> list:
+    poly = sp.Poly(1, LAM)
+    for lam, multiplicity in _multiplicities(problem["ground_truth"]).items():
+        poly = poly * sp.Poly(LAM - lam, LAM) ** multiplicity
+    return poly.all_coeffs()
+
+
+def _grade_row_op(problem: dict, c: dict):
+    ops = parse_ops(c["op"])
+    if ops is None:
+        return None
+    A, M = mat(problem["A"]), mat(c["matrix"])
+    starts = [A, A.row_join(sp.eye(A.rows))]
+    if problem.get("b") is not None:
+        b = vec(problem["b"])
+        starts += [A.T * A, (A.T * A).row_join(A.T * b)]
+    if c.get("start"):
+        start = mat(c["start"])
+        truth = problem["ground_truth"]
+        shifted = [A - lam * sp.eye(A.rows) for lam in _multiplicities(truth)] if "eigenvalues" in truth else []
+        if not any(same_rowspace(s, start) for s in starts + shifted):
+            return False
+        starts = [start]
+    return any(s.shape == M.shape and _apply(s, ops) == M for s in starts)
+
+
+def _grade_minor(problem: dict, c: dict):
+    A = mat(problem["A"])
+    i, j = int(c["row"]) - 1, int(c["col"]) - 1
+    minor = A.minor_submatrix(i, j).det(method="bareiss")
+    return num(c["value"]) == (minor if c["type"] == "minor" else (-1) ** (i + j) * minor)
+
+
+def _grade(problem: dict, c: dict):
+    """True, False, or None if this claim cannot be compared with the ground truth."""
+    t, truth, A = c.get("type"), problem["ground_truth"], mat(problem["A"])
+    if t == "intermediate_matrix":
+        return _grade_intermediate(problem, c)
+    if t == "rref":
+        return mat(c["matrix"]) == mat(truth["rref"]) if "rref" in truth else None
+    if t == "rank":
+        return num(c["value"]) == A.rank()
+    if t == "determinant":
+        return num(c["value"]) == A.det(method="bareiss")
+    if t == "det_relation":
+        return num(c["coefficient"]) * mat(c["matrix"]).det(method="bareiss") == A.det(method="bareiss")
+    if t == "inverse":
+        return mat(c["matrix"]) == mat(truth["inverse"]) if "inverse" in truth else None
+    if t == "eigenvalue":
+        return num(c["value"]) in _multiplicities(truth) if "eigenvalues" in truth else None
+    if t == "eigenvalues":
+        if "eigenvalues" not in truth:
+            return None
+        count: dict = {}
+        for value in c["values"]:
+            count[num(value)] = count.get(num(value), 0) + 1
+        return count == _multiplicities(truth)
+    if t == "eigenvector":
+        return _grade_eigenvector(problem, c) if "eigenspaces" in truth else None
+    if t == "charpoly":
+        if "eigenvalues" not in truth:
+            return None
+        coeffs, gold = [num(x) for x in c["coefficients"]], _charpoly_coefficients(problem)
+        return coeffs == gold or coeffs == [(-1) ** A.rows * x for x in gold]
+    if t == "diagonalisation":
+        return grade(problem, {"P": c["P"], "D": c["D"]})
+    if t == "lsq_solution":
+        return vec(c["vector"]) == vec(truth["x"]) if "x" in truth else None
+    if t == "AtA":
+        return mat(c["matrix"]) == A.T * A
+    if t == "Atb":
+        return vec(c["vector"]) == A.T * vec(problem["b"])
+    if t == "normal_vector":
+        v, b = vec(c["vector"]), vec(problem["b"])
+        return v == A.T * b or v == vec(truth["x"])
+    if t == "trace":
+        return num(c["value"]) == A.trace()
+    if t == "invertible":
+        return c["value"] == (A.det(method="bareiss") != 0) if isinstance(c["value"], bool) else None
+    if t == "row_op":
+        return _grade_row_op(problem, c)
+    if t in ("minor", "cofactor"):
+        return _grade_minor(problem, c)
+    if t == "arithmetic":
+        return evaluate(c["expr"]) == num(c["value"])
+    return None
+
+
+def grade_claim(problem: dict, claim) -> str:
+    """correct, wrong or unscorable, against the ground truth and problem data only."""
+    if not isinstance(claim, dict):
+        return "unscorable"
+    try:
+        result = _grade(problem, claim)
+    except (*_READ_ERRORS, ValueError, sp.matrices.exceptions.ShapeError):
+        return "unscorable"
+    if result is None:
+        return "unscorable"
+    return "correct" if result else "wrong"
 
 
 def consistent_computation_error(problem: dict, answer, trace) -> bool:

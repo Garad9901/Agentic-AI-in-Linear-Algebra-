@@ -1,0 +1,5 @@
+system,size,calls,truncated,truncation_rate
+B1,3,2,0,0.000 (0/2)
+B1,4,3,0,0.000 (0/3)
+B1,5,1,0,0.000 (0/1)
+B1,all,6,0,0.000 (0/6)

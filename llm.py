@@ -1,8 +1,9 @@
 """LLM wrapper: one function, call_llm(role, prompt) -> text.
 
-Provider, model and key come from .env. Temperature is 0.7 (prereg-v1 s5). Every
-response is cached on disk under a hash of (model, prompt, run), so a rerun costs
-zero API calls and each of the 3 runs gets a fresh response. Rate limits and server errors back off exponentially. Every
+run.py chooses the provider and model; keys come from .env or the environment.
+Temperature is 0.7 (prereg-v1 s5). Every response is cached on disk under a hash of
+(provider, model, run, prompt hash), so a rerun costs zero API calls, each of the 3 runs
+gets a fresh response, and the two providers never share a reply. Rate limits and server errors back off exponentially. Every
 call, cached or live, is logged to logs/calls.jsonl with role, tokens and
 latency. The key and the prompt text are never logged.
 
@@ -15,6 +16,7 @@ import hashlib
 import http.client
 import json
 import os
+import re
 import threading
 import time
 import urllib.error
@@ -29,7 +31,7 @@ ROOT = Path(__file__).resolve().parent
 CACHE_DIR = ROOT / "cache"
 LOG_PATH = ROOT / "logs" / "calls.jsonl"
 
-# provider -> (base URL, fallback key env var, default requests/minute)
+# provider -> (base URL, key env var, default requests/minute)
 PROVIDERS = {
     "groq": ("https://api.groq.com/openai/v1", "GROQ_API_KEY", 25),
     "gemini": ("https://generativelanguage.googleapis.com/v1beta/openai", "GEMINI_API_KEY", 9),
@@ -40,7 +42,9 @@ PROVIDERS = {
     "together": ("https://api.together.xyz/v1", "TOGETHER_API_KEY", 50),
 }
 RETRY_STATUS = (429, 500, 502, 503, 504)
-DAILY_QUOTA = "PerDay"  # Gemini names per-day limits like GenerateRequestsPerDayPerProjectPerModel
+DAILY_QUOTA = ("PerDay", "per day")  # e.g. GenerateRequestsPerDayPerProjectPerModel, "tokens per day (TPD)"
+_ORG_ID = re.compile(r"org_[a-z0-9]+")
+MAX_OUTPUT_TOKENS = 65536  # the most either model allows, so 5x5 problems are not cut off
 CHARS_PER_TOKEN = 1.8  # measured from HTTP 413 sizes: prompts are mostly digits and brackets
 TPM_MARGIN = 100
 
@@ -55,6 +59,23 @@ class LLMError(RuntimeError):
     pass
 
 
+class BatchPending(Exception):
+    """Batch mode: this reply is not available yet. See batch.py."""
+
+
+class BatchCollector:
+    """Gathers the prompts that a batch round still needs."""
+
+    def __init__(self, failed=()):
+        self.pending: dict = {}
+        self.failed = set(failed)
+
+
+def configure(provider: str, model: str) -> None:
+    os.environ["LLM_PROVIDER"] = provider
+    os.environ["LLM_MODEL"] = model
+
+
 def _trackers() -> list:
     if not hasattr(_state, "trackers"):
         _state.trackers = []
@@ -63,6 +84,16 @@ def _trackers() -> list:
 
 def current_run() -> int:
     return getattr(_state, "run", 1)
+
+
+@contextmanager
+def use_batch(collector: BatchCollector):
+    """Calls inside the block read the cache, and report what is missing to the collector."""
+    _state.batch = collector
+    try:
+        yield
+    finally:
+        _state.batch = None
 
 
 @contextmanager
@@ -100,9 +131,9 @@ def _settings() -> dict:
     provider = os.environ.get("LLM_PROVIDER", "").strip().lower()
     model = os.environ.get("LLM_MODEL", "").strip()
     if provider not in PROVIDERS:
-        raise LLMError(f"LLM_PROVIDER must be one of {sorted(PROVIDERS)}, got {provider!r}. See .env.example.")
+        raise LLMError(f"unknown provider {provider!r}: choose one with run.py --provider")
     if not model:
-        raise LLMError("LLM_MODEL is not set. See .env.example.")
+        raise LLMError("no model set: run.py --provider reads it from config/models.yaml")
     base, key_env, rpm = PROVIDERS[provider]
     return {
         "provider": provider,
@@ -110,8 +141,8 @@ def _settings() -> dict:
         "base": base,
         "key_env": key_env,
         "rpm": float(os.environ.get("LLM_RPM") or rpm),
-        "max_tokens": int(os.environ.get("LLM_MAX_TOKENS") or 8192),
-        "max_retries": int(os.environ.get("LLM_MAX_RETRIES") or 6),
+        "max_tokens": int(os.environ.get("LLM_MAX_TOKENS") or MAX_OUTPUT_TOKENS),
+        "max_retries": int(os.environ.get("LLM_MAX_RETRIES") or 12),
         "max_wait": float(os.environ.get("LLM_MAX_WAIT") or 180),
         "json_mode": os.environ.get("LLM_JSON_MODE", "0") == "1",
         "tpm": int(os.environ.get("LLM_TPM") or 0),
@@ -121,9 +152,9 @@ def _settings() -> dict:
 
 
 def _api_key(cfg: dict) -> str:
-    key = os.environ.get("LLM_API_KEY", "").strip() or os.environ.get(cfg["key_env"], "").strip()
+    key = os.environ.get(cfg["key_env"], "").strip()
     if not key:
-        raise LLMError(f"no API key: set LLM_API_KEY in .env (or {cfg['key_env']} in the environment)")
+        raise LLMError(f"no API key: set {cfg['key_env']} in .env or the environment")
     return key
 
 
@@ -137,8 +168,9 @@ def _reply_budget(cfg: dict, prompt: str) -> int:
     return budget
 
 
-def cache_key(model: str, prompt: str, run: int) -> str:
-    return hashlib.sha256(json.dumps([model, prompt, run], ensure_ascii=False).encode("utf-8")).hexdigest()
+def cache_key(provider: str, model: str, run: int, prompt: str) -> str:
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
+    return hashlib.sha256(json.dumps([provider, model, run, prompt_hash]).encode("utf-8")).hexdigest()
 
 
 def _cache_path(key: str) -> Path:
@@ -157,6 +189,12 @@ def _write_cache(key: str, entry: dict) -> None:
     tmp = _cache_path(key).with_suffix(".tmp")
     tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
     tmp.replace(_cache_path(key))
+
+
+def store(cfg: dict, key: str, entry: dict) -> None:
+    """Save a reply that arrived by batch, and log it once as the real call it was."""
+    _write_cache(key, entry)
+    _log_file(_record("batch", cfg, entry, cached=False, request_s=0.0))
 
 
 def _pace(rpm: float) -> None:
@@ -205,8 +243,8 @@ def _request(cfg: dict, prompt: str) -> dict:
                 resp = json.loads(r.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             body_text = e.read().decode(errors="replace")
-            msg = body_text[:300]
-            if e.code == 429 and DAILY_QUOTA in body_text:
+            msg = _ORG_ID.sub("org_***", body_text[:300])  # results are published
+            if e.code == 429 and any(marker in body_text for marker in DAILY_QUOTA):
                 raise LLMError(f"daily quota exhausted for {cfg['model']}: retrying today cannot help") from None
             if e.code in RETRY_STATUS and attempt <= cfg["max_retries"]:
                 rate_limits += e.code == 429
@@ -235,36 +273,22 @@ def _request(cfg: dict, prompt: str) -> dict:
     raise LLMError("retries exhausted")
 
 
-def _log(record: dict) -> None:
+def _log_file(record: dict) -> None:
     LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
     with _log_lock, open(LOG_PATH, "a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
-    for calls in _trackers():
-        calls.append(record)
 
 
-def call_llm(role: str, prompt: str) -> str:
-    cfg = _settings()
-    key = cache_key(cfg["model"], prompt, current_run())
-    entry = _read_cache(key)
-    cached = entry is not None
-    request_s = 0.0
-    if entry is None:
-        t0 = time.time()
-        entry = _request(cfg, prompt)
-        request_s = time.time() - t0  # includes pacing and backoff, which are not compute
-        # An empty reply cut off by the token limit is the model failing to answer, not an outage.
-        if not entry["text"].strip() and entry["finish_reason"] != "length":
-            raise LLMError(f"empty reply (finish_reason={entry['finish_reason']})")
-        _write_cache(key, entry)
+def _record(role: str, cfg: dict, entry: dict, cached: bool, request_s: float) -> dict:
     # Tokens and latency are those of the original call, so T7 is the same on a cached rerun.
-    _log({
+    return {
         "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "role": role,
         "provider": cfg["provider"],
         "model": cfg["model"],
         "run": current_run(),
         "cached": cached,
+        "batch": bool(entry.get("batch")),
         "prompt_tokens": entry.get("prompt_tokens"),
         "completion_tokens": entry.get("completion_tokens"),
         "total_tokens": entry.get("total_tokens"),  # includes thinking, which completion_tokens may not
@@ -274,5 +298,32 @@ def call_llm(role: str, prompt: str) -> str:
         "rate_limit_errors": 0 if cached else entry.get("rate_limit_errors"),
         "timeouts": 0 if cached else entry.get("timeouts"),
         "finish_reason": entry.get("finish_reason"),
-    })
+    }
+
+
+def call_llm(role: str, prompt: str) -> str:
+    cfg = _settings()
+    key = cache_key(cfg["provider"], cfg["model"], current_run(), prompt)
+    collector = getattr(_state, "batch", None)
+    entry = _read_cache(key)
+    cached = entry is not None
+    request_s = 0.0
+    if entry is None:
+        if collector is not None:
+            if key in collector.failed:
+                raise LLMError("batch request failed repeatedly")
+            collector.pending[key] = prompt
+            raise BatchPending(key)
+        t0 = time.time()
+        entry = _request(cfg, prompt)
+        request_s = time.time() - t0  # includes pacing and backoff, which are not compute
+        # An empty reply cut off by the token limit is the model failing to answer, not an outage.
+        if not entry["text"].strip() and entry["finish_reason"] != "length":
+            raise LLMError(f"empty reply (finish_reason={entry['finish_reason']})")
+        _write_cache(key, entry)
+    record = _record(role, cfg, entry, cached, request_s)
+    if collector is None:  # a batch round replays calls that store() has logged already
+        _log_file(record)
+    for calls in _trackers():
+        calls.append(record)
     return entry["text"]
