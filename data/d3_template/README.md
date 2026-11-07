@@ -1,5 +1,7 @@
 # D3 transcription format (real student solutions)
 
+**Superseded on 6 Nov 2026.** Use `data/d3_template.csv` and `docs/ANNOTATION_GUIDE.md`. This page describes the earlier JSONL format.
+
 Real student data never goes in this repository. Keep it in `data/private/d3/` (git-ignored):
 
 ```

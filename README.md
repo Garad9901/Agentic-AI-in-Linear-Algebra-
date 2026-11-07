@@ -8,7 +8,13 @@ Student data is never stored in this repository.
 
 License: MIT, see [LICENSE](LICENSE).
 
-## Code (added 1 Nov 2026, before any LLM run)
+## Running the benchmark
+
+The current code is at the repository root: `run.py`, `score.py`, `systems.py`, `grader.py`, `agents/` and `verifier/`. See [docs/BENCHMARK.md](docs/BENCHMARK.md). Dataset sources and licences are in [data/SOURCES.md](data/SOURCES.md), and D3 annotators should follow [docs/ANNOTATION_GUIDE.md](docs/ANNOTATION_GUIDE.md).
+
+## Earlier code (added 1 Nov 2026, before any LLM run)
+
+This code is kept for the record. It no longer produces results.
 
 | Path | What it is |
 |---|---|

@@ -11,3 +11,8 @@ data/**/*.pdf
 # Python
 __pycache__/
 .venv/
+
+# Run state, regenerable
+cache/
+logs/
+.pytest_cache/

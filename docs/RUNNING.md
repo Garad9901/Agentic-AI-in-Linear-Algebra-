@@ -1,5 +1,7 @@
 # How to run the experiments
 
+**Superseded by [BENCHMARK.md](BENCHMARK.md) on 6 Nov 2026.** This page describes the earlier `latutor/` code.
+
 Commands are for Windows PowerShell; on macOS/Linux use `export NAME=value` instead of `$env:NAME="value"`.
 
 ## 0. Install and self-check (once)
