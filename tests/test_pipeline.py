@@ -85,6 +85,7 @@ def reply(text="hello"):
 def sandbox(tmp_path, monkeypatch):
     monkeypatch.setattr(llm, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(llm, "LOG_PATH", tmp_path / "logs" / "calls.jsonl")
+    monkeypatch.setattr(llm, "_next_slot", 0.0)
     monkeypatch.setattr(llm.time, "sleep", lambda s: sleeps.append(s))
     monkeypatch.setattr(llm, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("LLM_PROVIDER", "groq")

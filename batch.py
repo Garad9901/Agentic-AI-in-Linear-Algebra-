@@ -17,7 +17,6 @@ paths for the job state and two for the results, so both are read here.
 from __future__ import annotations
 
 import json
-import os
 import time
 import urllib.error
 import urllib.request
@@ -107,9 +106,7 @@ def _load(path: Path) -> dict:
 
 def _save(path: Path, state: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(state), encoding="utf-8")
-    os.replace(tmp, path)
+    llm.atomic_write(path, json.dumps(state))
 
 
 def _wait(cfg: dict, name: str, poll_seconds: float) -> dict:

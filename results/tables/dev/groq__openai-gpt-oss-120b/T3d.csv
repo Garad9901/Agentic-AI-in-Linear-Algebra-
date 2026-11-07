@@ -1,1 +1,1 @@
-topic,size,responses,claims,certified_coverage,ci95_low,ci95_high,decidable_share,weak_share
+topic,size,responses,claims,certified_coverage,ci95_low,ci95_high,decidable_share,weakly_checked_share

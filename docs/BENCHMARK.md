@@ -48,6 +48,17 @@ Tune `agents/prompts.py` on the dev split only.
 
 Every response is cached under `cache/` by (provider, model, run, prompt hash), so rerunning a stopped command resumes at no API cost, and each run still gets a fresh response. Every call is logged to `logs/calls.jsonl`, and every completed command to `results/RUN_INFO.md`.
 
+## Claim audit
+
+Two humans check 10% of the claim extractions on dev outputs before `FROZEN` exists, and again on 10% of test outputs after the test run:
+
+```powershell
+python tools/claim_audit.py sample --split dev   # writes audit/claims_dev_rater1.csv and rater2.csv
+python tools/claim_audit.py agree --split dev    # percent agreement and Cohen's kappa
+```
+
+Raters fill in `extraction_correct` with y or n, and work independently. `sample` never overwrites a sheet.
+
 ## Layout
 
 | Path | What it is |
@@ -89,8 +100,8 @@ The rest of `latutor/` and the older scripts are kept for the record, but they n
 ## Definitions
 
 - **RQ1 wrong-claim rate** (T2b): the share of responses with at least 1 delivered claim that contradicts the ground truth, graded by `grader.py`. Reported as mean, SD and range over runs with a clustered bootstrap CI. A response that abstains delivers no claims, so read it with the abstention rate.
-- **RQ4 coverage** (T3d): certified claims / all extracted claims in what OURS delivers, from the verifier. The decidable share adds refuted claims. Claims that pass only on row-equivalence count as certified, and `weak_share` shows how many.
-- **Primary tests** (T8): McNemar, exact when discordant pairs < 25, on the per-item majority of 3 runs, with Holm across the 4 registered comparisons in each model. Per-run tests are the sensitivity analysis.
+- **RQ4 coverage** (T3d): certified claims / all extracted claims in what OURS delivers, from the verifier. The decidable share adds refuted claims. A row operation is certified only if applying its stated operation reproduces the next matrix exactly. Claims that pass on row-equivalence alone are reported as `weakly_checked_share` and never count as certified.
+- **Primary tests** (T8): McNemar, exact when discordant pairs < 25, on the per-item majority of 3 runs, with Holm across the 4 registered comparisons in each model. Per-run tests are a sensitivity analysis, and so is Holm across all 8 comparisons (T8b).
 - **Accuracy** is correct / all problems, so an abstention counts as not correct. T3b also gives accuracy when answered.
 - **Consistent computation error**: wrong, but the response's own working arrives at it.
 - **Fabricated**: wrong, not derived from the working (none shown, or it differs from the last value the working computes), and passes a surface check: eigenvalues sum to trace(A) for eigenpairs, trace(D) == trace(A) for diagonalisation. Other topics report n/a.
@@ -103,7 +114,7 @@ The rest of `latutor/` and the older scripts are kept for the record, but they n
 
 ## Limits of the checks
 
-- **Row-equivalence is weak for full-rank square matrices.** Every invertible n x n matrix is row-equivalent to every other, so a slip in reducing an invertible matrix cannot be seen that way. The step checker applies a stated row operation exactly, so D3 annotators must write it in `step_text`: see [ANNOTATION_GUIDE.md](ANNOTATION_GUIDE.md). Steps that pass only on the weak check are counted in the `weak_steps` column.
+- **Row-equivalence never certifies.** Every invertible n x n matrix is row-equivalent to every other, so a slip in reducing an invertible matrix cannot be seen that way. The step checker applies a stated row operation exactly, so D3 annotators must write it in `step_text`: see [ANNOTATION_GUIDE.md](ANNOTATION_GUIDE.md). A step that passes on row-equivalence alone is weakly checked. It is delivered, because nothing refutes it, but it is not counted as certified.
 - **Intermediate determinant values are not checked** unless they carry arithmetic in `expr`. Only the last value is compared with det(A), so a wrong minor is located at the final value.
 - **Runs are samples, not seeds.** The Gemini endpoint rejects a `seed` field, so a run can be reproduced from the local cache but not from the API.
 

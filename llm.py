@@ -47,6 +47,7 @@ _ORG_ID = re.compile(r"org_[a-z0-9]+")
 MAX_OUTPUT_TOKENS = 65536  # the most either model allows, so 5x5 problems are not cut off
 CHARS_PER_TOKEN = 1.8  # measured from HTTP 413 sizes: prompts are mostly digits and brackets
 TPM_MARGIN = 100
+REPLACE_ATTEMPTS = 8
 
 # Per thread, because run.py works on several problems at once.
 _state = threading.local()
@@ -184,11 +185,24 @@ def _read_cache(key: str) -> dict | None:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def atomic_write(path: Path, text: str) -> None:
+    """Windows can hold a new file briefly (antivirus, OneDrive), and os.replace then raises
+    PermissionError. A reply that is already paid for must not be lost to that."""
+    tmp = path.parent / f"{path.name}.{threading.get_ident()}.tmp"
+    tmp.write_text(text, encoding="utf-8")
+    for attempt in range(REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(0.05 * 2 ** attempt)
+
+
 def _write_cache(key: str, entry: dict) -> None:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = _cache_path(key).with_suffix(".tmp")
-    tmp.write_text(json.dumps(entry, ensure_ascii=False), encoding="utf-8")
-    tmp.replace(_cache_path(key))
+    atomic_write(_cache_path(key), json.dumps(entry, ensure_ascii=False))
 
 
 def store(cfg: dict, key: str, entry: dict) -> None:

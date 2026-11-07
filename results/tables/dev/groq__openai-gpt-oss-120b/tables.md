@@ -65,10 +65,10 @@
 
 ## T3d. RQ4 certified-claim coverage (OURS)
 
-| topic | size | responses | claims | certified_coverage | ci95_low | ci95_high | decidable_share | weak_share |
+| topic | size | responses | claims | certified_coverage | ci95_low | ci95_high | decidable_share | weakly_checked_share |
 |---|---|---|---|---|---|---|---|---|
 
-- Certified claims / all extracted claims in the delivered version, from the verifier. Decidable share is (certified + refuted) / all. Claims that pass only on row-equivalence count as certified; weak_share shows how many, because row-equivalence cannot see arithmetic slips on full-rank matrices.
+- Certified claims / all extracted claims in the delivered version, from the verifier. A row operation is certified only if applying its stated operation reproduces the next matrix exactly. Claims that pass on row-equivalence alone are weakly checked: they never count as certified, and are reported separately. Decidable share is (certified + refuted) / all.
 - Blank if OURS has not been run. Coverage of student steps (prereg-v1 T3) needs D3.
 
 ## T3b. Wrong answers, fabricated answers and abstention

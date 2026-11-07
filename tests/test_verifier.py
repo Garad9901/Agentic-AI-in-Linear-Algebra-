@@ -377,8 +377,7 @@ def test_claim_refuted(claim):
     assert check_claim(A2, claim) == "refuted"
 
 
-@pytest.mark.parametrize("claim", ["text", {"type": "vibes"}, {"type": "determinant"},
-                                   {"type": "row_equivalent", "matrix": [[1, 0], [0, 1]]}])
+@pytest.mark.parametrize("claim", ["text", {"type": "vibes"}, {"type": "determinant"}])
 def test_claim_uncheckable(claim):
     assert check_claim(A2, claim) == "uncheckable"
 

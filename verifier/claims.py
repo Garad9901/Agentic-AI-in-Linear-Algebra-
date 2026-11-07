@@ -27,7 +27,7 @@ from .exact import ParseError, evaluate, mat, num, same_rowspace, vec
 from .leak import numbers_in
 from .steps import BadOp, apply_ops, parse_ops
 
-CERTIFIED, REFUTED, UNCHECKABLE = "certified", "refuted", "uncheckable"
+CERTIFIED, REFUTED, UNCHECKABLE, WEAK = "certified", "refuted", "uncheckable", "weak"
 _TRIVIAL = {sp.Integer(0), sp.Integer(1), sp.Integer(-1)}
 
 
@@ -91,9 +91,9 @@ def _check(A, b, c: dict) -> str:
             return REFUTED
     if t == "row_equivalent":
         M = mat(c["matrix"])
-        if M.shape != A.shape or M.rank() == M.cols:
-            return UNCHECKABLE  # every full-rank square matrix is row-equivalent to A
-        return _verdict(same_rowspace(A, M))
+        if M.shape != A.shape:
+            return UNCHECKABLE
+        return WEAK if same_rowspace(A, M) else REFUTED  # never certified: no operation was applied
     if t == "AtA":
         return _verdict(mat(c["matrix"]) == A.T * A)
     if t == "Atb":

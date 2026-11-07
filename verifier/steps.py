@@ -3,12 +3,11 @@
 A step is a bare matrix, a bare value, or an object with any of:
   text, op, matrix, vector, value, expr, factor, eigenvalue, coefficients
 
-Row-equivalence alone cannot catch an arithmetic slip when the matrix is square
-and full rank, because every invertible n x n matrix is row-equivalent to every
-other. So a stated row operation ("R2 <- R2 - 3R1", in `op` or in `text`) is
-applied exactly and the result compared. A full-rank square step with no stated
-operation passes on row-equivalence alone and is listed in `weak`, so reports
-can show how much rests on that weaker check.
+A row operation is certified only if applying its stated operation (in `op` or `text`)
+reproduces the step exactly. Row-equivalence cannot do this job: every invertible n x n
+matrix is row-equivalent to every other, so it misses arithmetic slips. A step that passes
+on row-equivalence alone is listed in `weak`, reported as weakly checked, and never counts
+as certified (decision of 2026-11-07).
 
 Steps that say nothing checkable are skipped and listed in `unchecked`. They are
 never reported as wrong.
@@ -125,7 +124,7 @@ def apply_ops(M: sp.Matrix, ops: list) -> sp.Matrix:
     return M
 
 
-def _step_ops(step: dict):
+def step_ops(step: dict):
     if step.get("op"):
         return parse_ops(step["op"])
     text = step.get("text")
@@ -139,7 +138,9 @@ def _transition(prev: sp.Matrix, cur: sp.Matrix, step: dict):
     """Returns (reason or None, weak)."""
     if prev.shape != cur.shape:
         return f"shape {cur.shape} does not follow from the previous {prev.shape}", False
-    ops = _step_ops(step)
+    if cur == prev:
+        return None, False  # restating the previous matrix: exact, and no operation to apply
+    ops = step_ops(step)
     if ops:
         try:
             expected = apply_ops(prev, ops)
@@ -150,7 +151,7 @@ def _transition(prev: sp.Matrix, cur: sp.Matrix, step: dict):
         return None, False
     if not same_rowspace(prev, cur):
         return "not row-equivalent to the previous step", False
-    return None, cur.rank() == cur.cols
+    return None, True
 
 
 def normalise_step(step) -> dict:
@@ -184,6 +185,7 @@ class _Checker:
         self.steps = steps
         self.report = StepReport()
         self.prev = self.A
+        self.shifted = {}  # lambda -> latest reduction of A - lambda I
         self.last_value = max((i for i, s in enumerate(steps) if "value" in s), default=None)
         self.last_matrix = max((i for i, s in enumerate(steps) if "matrix" in s), default=None)
         if topic == "inverse":
@@ -275,8 +277,16 @@ class _Checker:
             cur = mat(s["matrix"])
             if lam is None or cur.shape != A.shape:
                 self.report.unchecked.append(i)  # P, D or other side working
-            elif not same_rowspace(A - lam * sp.eye(n), cur):
+                return None
+            shifted = A - lam * sp.eye(n)
+            if not same_rowspace(shifted, cur):
                 return f"not row-equivalent to A - ({lam})I"
+            reason, weak = _transition(self.shifted.get(lam, shifted), cur, s)
+            if reason:
+                return reason
+            if weak:
+                self.report.weak.append(i)
+            self.shifted[lam] = cur
             return None
         if lam is None and "value" in s:
             lam = num(s["value"])

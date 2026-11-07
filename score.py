@@ -7,7 +7,8 @@ model. A cell that cannot be computed stays blank, and the note under the table 
 why. No number here comes from anywhere but a result row or a dataset file.
 
 The pre-registered metrics are RQ1 wrong-claim rate (T2b), RQ4 coverage (T3d) and the
-McNemar tests with Holm correction (T8). They use latutor/stats.py and the per-item
+McNemar tests with Holm correction within each model (T8), with Holm across all 8
+comparisons as a sensitivity analysis (T8b). They use latutor/stats.py and the per-item
 majority rule from docs/DEVIATIONS.md. Claims are graded by grader.py against the
 ground truth; RQ4 asks the verifier what it can certify, which is a separate question.
 """
@@ -113,7 +114,7 @@ def load_results(split: str, results: Path = RESULTS) -> dict:
     return {k: pd.concat(v, ignore_index=True) for k, v in frames.items()}
 
 
-def _delivered(row) -> list:
+def delivered_hints(row) -> list:
     return [h for h in json.loads(row["hints_json"]) if not h.get("withheld") and h.get("text")]
 
 
@@ -148,7 +149,8 @@ def claim_stats(problem: dict, delivered: bool, trace, answer, hints: list) -> d
         "n_wrong_claims": grades.count("wrong"),
         "n_unscorable_claims": grades.count("unscorable"),
         "wrong_claim": int("wrong" in grades),
-        "n_certified": statuses.count("certified") + statuses.count("weak"),
+        "n_weakly_graded": grades.count("weak"),
+        "n_certified": statuses.count("certified"),  # weakly checked claims never count as certified
         "n_weak": statuses.count("weak"),
         "n_refuted": statuses.count("refuted"),
     }
@@ -170,7 +172,7 @@ def grade_d1(frame: pd.DataFrame, problems: dict) -> pd.DataFrame:
         delivered.append(has_answer)
         consistent.append(has_answer and grader.consistent_computation_error(p, answer, trace))
         fabricated.append(grader.fabricated(p, answer if has_answer else None, trace))
-        hints = _delivered(row)
+        hints = delivered_hints(row)
         truth = grader.answer_of(p)
         leaks.append(sum(leak_check(h["text"], p["topic"], truth, h.get("claims")).leaked for h in hints))
         checks = [verify_hint(p, h["text"], h.get("claims")) for h in hints]
@@ -178,7 +180,8 @@ def grade_d1(frame: pd.DataFrame, problems: dict) -> pd.DataFrame:
         with_claim.append(sum(c.verified and c.n_certified > 0 for c in checks))
         n_hints.append(len(hints))
         stats.append(claim_stats(p, row["status"] == "answered", trace, answer, hints))
-    for column in ("n_claims", "n_wrong_claims", "n_unscorable_claims", "wrong_claim", "n_certified", "n_weak", "n_refuted"):
+    for column in ("n_claims", "n_wrong_claims", "n_unscorable_claims", "n_weakly_graded", "wrong_claim",
+                   "n_certified", "n_weak", "n_refuted"):
         usable[column] = [s[column] for s in stats]
     usable["correct"] = correct
     usable["wrong"] = wrong
@@ -241,12 +244,12 @@ def coverage_row(frame: pd.DataFrame, bootstrap: int) -> dict:
             "certified_coverage": _num(frame["n_certified"].sum() / claims),
             "ci95_low": _num(low), "ci95_high": _num(high),
             "decidable_share": _num((frame["n_certified"].sum() + frame["n_refuted"].sum()) / claims),
-            "weak_share": _num(frame["n_weak"].sum() / claims)}
+            "weakly_checked_share": _num(frame["n_weak"].sum() / claims)}
 
 
 def t3d_coverage(frame, bootstrap: int) -> pd.DataFrame:
     columns = ["topic", "size", "responses", "claims", "certified_coverage", "ci95_low", "ci95_high",
-               "decidable_share", "weak_share"]
+               "decidable_share", "weakly_checked_share"]
     if frame is None:
         return pd.DataFrame(columns=columns)
     rows = [{"topic": "all", "size": "all", **coverage_row(frame, bootstrap)}]
@@ -282,14 +285,15 @@ def _test_row(rq: str, comparison: str, pairing: str, result: dict | None, adjus
     return row
 
 
-def holm_family(primary: dict) -> dict:
-    """Holm over the 4 registered comparisons. Empty unless all 4 have a p-value."""
-    if len(primary) != 4 or any(r is None for r in primary.values()):
+def holm_family(primary: dict, size: int = 4) -> dict:
+    """Holm over a whole family. Empty unless every comparison in it has a p-value."""
+    if len(primary) != size or any(r is None for r in primary.values()):
         return {}
     return {k: _num(v, 4) for k, v in holm({k: r["p"] for k, r in primary.items()}).items()}
 
 
-def t8_tests(graded: dict, rq2: dict) -> tuple[pd.DataFrame, list]:
+def primary_results(graded: dict, rq2: dict) -> tuple:
+    """(majority, per_run) for the 4 registered comparisons of one model."""
     majority, per_run = {}, {}
     for base in RQ1_BASELINES:
         key = ("RQ1", f"{S0} vs {base}")
@@ -302,6 +306,11 @@ def t8_tests(graded: dict, rq2: dict) -> tuple[pd.DataFrame, list]:
         majority[key], per_run[key] = paired_tests(rq2[S0], rq2[RQ2_BASELINE], "first_error_wrong")
     else:
         majority[key], per_run[key] = None, {}
+    return majority, per_run
+
+
+def t8_tests(graded: dict, rq2: dict) -> tuple[pd.DataFrame, list]:
+    majority, per_run = primary_results(graded, rq2)
     adjusted = holm_family(majority)
     rows = []
     for key, result in majority.items():
@@ -318,6 +327,19 @@ def t8_tests(graded: dict, rq2: dict) -> tuple[pd.DataFrame, list]:
         notes.append("holm_p is blank: Holm runs across all 4 registered comparisons, and at least one has no "
                      "majority p-value yet. RQ2 needs D3.")
     return pd.DataFrame(rows, columns=columns, dtype=object).fillna(""), notes
+
+
+def t8b_all_comparisons(primaries: dict, models: int = 2) -> tuple[pd.DataFrame, list]:
+    """Sensitivity analysis: Holm across the 4 comparisons of both models, 8 in all."""
+    pooled = {(tag, *key): result for tag, family in primaries.items() for key, result in family.items()}
+    adjusted = holm_family(pooled, 4 * models)
+    rows = [{"model": key[0], "rq": key[1], "comparison": key[2], "p": _num(result["p"], 4) if result else "",
+             "holm_p_across_8": adjusted.get(key, "")} for key, result in pooled.items()]
+    notes = ["Sensitivity analysis only. The registered family is the 4 comparisons within each model (T8)."]
+    if not adjusted:
+        notes.append("holm_p_across_8 is blank until both models have majority p-values for all 4 comparisons.")
+    columns = ["model", "rq", "comparison", "p", "holm_p_across_8"]
+    return pd.DataFrame(rows, columns=columns), notes
 
 
 def rq2_frames(d3: dict, gold: dict) -> dict:
@@ -542,7 +564,8 @@ def model_tags(split: str, results: Path = RESULTS) -> list:
     return sorted({key[2] for key in load_results(split, results)})
 
 
-def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap: int = BOOTSTRAP) -> list:
+def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap: int = BOOTSTRAP,
+          primaries: dict | None = None) -> list:
     problems = gen_d1.load()
     by_id = {p["id"]: p for p in problems}
     loaded = load_results(split, results)
@@ -580,9 +603,10 @@ def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap
         "The human audit of 10% of claim extractions (PREREGISTRATION.md s3) has not been done.",
     ]))
     tables.append(("T3d", "RQ4 certified-claim coverage (OURS)", t3d_coverage(graded.get(S0), bootstrap), [
-        "Certified claims / all extracted claims in the delivered version, from the verifier. Decidable share "
-        "is (certified + refuted) / all. Claims that pass only on row-equivalence count as certified; weak_share "
-        "shows how many, because row-equivalence cannot see arithmetic slips on full-rank matrices.",
+        "Certified claims / all extracted claims in the delivered version, from the verifier. A row operation "
+        "is certified only if applying its stated operation reproduces the next matrix exactly. Claims that "
+        "pass on row-equivalence alone are weakly checked: they never count as certified, and are reported "
+        "separately. Decidable share is (certified + refuted) / all.",
         "Blank if OURS has not been run. Coverage of student steps (prereg-v1 T3) needs D3.",
     ]))
     tables.append(("T3b", "Wrong answers, fabricated answers and abstention", t3b_reliability(graded, base, d1), [
@@ -627,6 +651,8 @@ def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap
     rq2 = rq2_frames(d3, d3_data.gold_labels(d3_frame)[0]) if d3_frame is not None and d3 else {}
     frame, notes = t8_tests(graded, rq2)
     tables.append(("T8", "McNemar tests with Holm correction (primary family)", frame, notes))
+    if primaries is not None:
+        primaries[tag] = primary_results(graded, rq2)[0]
     return tables
 
 
@@ -646,11 +672,16 @@ def main() -> None:
     ap.add_argument("--split", choices=["dev", "test"], default="dev")
     args = ap.parse_args()
     tags = model_tags(args.split) or [None]
+    primaries: dict = {}
     for tag in tags:
         out = RESULTS / "tables" / args.split / (tag or "no_results")
-        write(build(args.split, tag), out)
+        write(build(args.split, tag, primaries=primaries), out)
         print(f"# {tag or 'no results'}\n")
         print((out / "tables.md").read_text(encoding="utf-8"))
+    frame, notes = t8b_all_comparisons(primaries)
+    out = RESULTS / "tables" / args.split
+    write([("T8b", "Holm across all 8 comparisons (sensitivity)", frame, notes)], out)
+    print(markdown(frame))
 
 
 if __name__ == "__main__":

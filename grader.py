@@ -17,10 +17,11 @@ from __future__ import annotations
 import sympy as sp
 
 from verifier.exact import ParseError, evaluate, mat, num, same_rowspace, vec
-from verifier.steps import parse_ops
+from verifier.steps import parse_ops, step_ops
 
 SURFACE_TOPICS = ("eigenpairs", "diagonalisation")
 LAM = sp.Symbol("lam")
+WEAK = "weak"  # consistent with the ground truth, but only by row-equivalence
 _READ_ERRORS = (ParseError, KeyError, TypeError, IndexError, AttributeError)
 
 
@@ -167,13 +168,6 @@ def _apply(M, ops):
     return M
 
 
-def _text_op(claim: dict):
-    if claim.get("op"):
-        return parse_ops(claim["op"])
-    text = claim.get("text")
-    return parse_ops(text.splitlines()[0]) if isinstance(text, str) and text.strip() else None
-
-
 def _reference(problem: dict, context: str, claim: dict):
     A = mat(problem["A"])
     if context == "A":
@@ -191,11 +185,11 @@ def _grade_intermediate(problem: dict, c: dict):
     ref = _reference(problem, c["context"], c)
     if M.shape != ref.shape or not same_rowspace(ref, M):
         return False
-    ops = _text_op(c)
-    if ops and c["context"] != "A_minus_lambda_I":
-        previous = mat(c["previous"]) if c.get("previous") is not None else ref
-        return _apply(previous, ops) == M
-    return True
+    previous = mat(c["previous"]) if c.get("previous") is not None else ref
+    if M == previous:
+        return True
+    ops = step_ops(c)
+    return _apply(previous, ops) == M if ops else WEAK
 
 
 def _grade_eigenvector(problem: dict, c: dict):
@@ -288,6 +282,9 @@ def _grade(problem: dict, c: dict):
         return c["value"] == (A.det(method="bareiss") != 0) if isinstance(c["value"], bool) else None
     if t == "row_op":
         return _grade_row_op(problem, c)
+    if t == "row_equivalent":
+        M = mat(c["matrix"])
+        return None if M.shape != A.shape else (WEAK if same_rowspace(A, M) else False)
     if t in ("minor", "cofactor"):
         return _grade_minor(problem, c)
     if t == "arithmetic":
@@ -296,7 +293,7 @@ def _grade(problem: dict, c: dict):
 
 
 def grade_claim(problem: dict, claim) -> str:
-    """correct, wrong or unscorable, against the ground truth and problem data only."""
+    """correct, wrong, weak or unscorable, against the ground truth and problem data only."""
     if not isinstance(claim, dict):
         return "unscorable"
     try:
@@ -305,6 +302,8 @@ def grade_claim(problem: dict, claim) -> str:
         return "unscorable"
     if result is None:
         return "unscorable"
+    if result == WEAK:
+        return WEAK
     return "correct" if result else "wrong"
 
 

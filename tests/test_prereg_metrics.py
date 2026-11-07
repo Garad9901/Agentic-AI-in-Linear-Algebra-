@@ -7,6 +7,7 @@ import io
 import json
 import sys
 import urllib.error
+from collections import Counter
 
 import pandas as pd
 import pytest
@@ -19,7 +20,8 @@ import score
 from extraction import extract
 from latutor.stats import holm, mcnemar
 from scripts import cost_probe
-from verifier import check_claim, step_statuses
+from tools import claim_audit
+from verifier import check_claim, step_statuses, verify_hint
 
 DET = {"id": "d", "topic": "determinant", "size": 2, "A": [[1, 2], [3, 4]], "ground_truth": {"determinant": -2}}
 RREF = {"id": "r", "topic": "rref_rank", "size": 2, "A": [[1, 2], [2, 4]],
@@ -170,13 +172,82 @@ def test_step_statuses_cover_every_step_and_do_not_stop():
 
 def test_rq4_coverage_by_hand():
     # Claims: step 1 weak, step 2 certified, step 3 statement, final determinant certified: 4 claims.
-    # Certified = 3 (weak counts) -> coverage 3/4. Refuted 0 -> decidable 3/4. Weak 1/4.
+    # Certified = 2, because weak never counts -> coverage 2/4. Refuted 0 -> decidable 2/4. Weak 1/4.
     trace = [{"matrix": [[1, 2], [0, -2]]}, {"value": -2}, {"text": "done"}]
     stats = score.claim_stats(DET, True, trace, {"determinant": -2}, [])
-    assert (stats["n_claims"], stats["n_certified"], stats["n_weak"], stats["n_refuted"]) == (4, 3, 1, 0)
+    assert (stats["n_claims"], stats["n_certified"], stats["n_weak"], stats["n_refuted"]) == (4, 2, 1, 0)
     frame = pd.DataFrame([{"problem_id": "d", **stats}])
     row = score.coverage_row(frame, bootstrap=100)
-    assert (row["certified_coverage"], row["decidable_share"], row["weak_share"]) == ("0.750", "0.750", "0.250")
+    assert row["certified_coverage"] == "0.500" and row["decidable_share"] == "0.500"
+    assert row["weakly_checked_share"] == "0.250"
+
+
+# ---- decision of 2026-11-07: row-equivalence alone never certifies
+SWAP = {"op": "R1 <-> R2", "matrix": [[2, 4], [1, 2]]}
+
+
+def test_a_stated_operation_reproducing_the_next_matrix_is_certified():
+    assert step_statuses("rref_rank", RREF, [SWAP]) == ["certified"]
+    assert grader.grade_claim(RREF, extract(RREF, [SWAP], None, [])[0]["claim"]) == "correct"
+
+
+def test_no_stated_operation_is_weak_even_when_rank_deficient():
+    step = {"matrix": [[1, 2], [0, 0]]}  # rank 1, so row-equivalence means something, but it still never certifies
+    assert step_statuses("rref_rank", RREF, [step]) == ["weak"]
+    assert grader.grade_claim(RREF, extract(RREF, [step], None, [])[0]["claim"]) == "weak"
+
+
+def test_an_unreadable_operation_is_weak_not_certified():
+    step = {"op": "eliminate the second row", "matrix": [[1, 2], [0, 0]]}
+    assert step_statuses("rref_rank", RREF, [step]) == ["weak"]
+
+
+def test_a_wrong_stated_operation_is_refuted_even_if_row_equivalent():
+    step = {"op": "R2 <- R2 + R1", "matrix": [[1, 2], [0, 0]]}  # row-equivalent to A, but R2 + R1 = [3, 6]
+    assert step_statuses("rref_rank", RREF, [step]) == ["refuted"]
+    assert grader.grade_claim(RREF, extract(RREF, [step], None, [])[0]["claim"]) == "wrong"
+
+
+def test_restating_the_previous_matrix_is_exact_not_weak():
+    assert step_statuses("rref_rank", RREF, [{"matrix": [[1, 2], [2, 4]]}]) == ["certified"]
+
+
+def test_a_lambda_i_reductions_follow_the_same_rule():
+    # A - 1I = [[1, 1], [1, 1]]. R2 <- R2 - R1 gives [[1, 1], [0, 0]].
+    good = {"eigenvalue": 1, "op": "R2 <- R2 - R1", "matrix": [[1, 1], [0, 0]]}
+    assert step_statuses("eigenpairs", EIG, [good]) == ["certified"]
+    assert grader.grade_claim(EIG, extract(EIG, [good], None, [])[0]["claim"]) == "correct"
+    no_op = {"eigenvalue": 1, "matrix": [[1, 1], [0, 0]]}
+    assert step_statuses("eigenpairs", EIG, [no_op]) == ["weak"]
+    assert grader.grade_claim(EIG, extract(EIG, [no_op], None, [])[0]["claim"]) == "weak"
+    wrong_op = {"eigenvalue": 1, "op": "R2 <- R2 + R1", "matrix": [[1, 1], [0, 0]]}
+    assert step_statuses("eigenpairs", EIG, [wrong_op]) == ["refuted"]
+
+
+def test_each_eigenvalue_keeps_its_own_chain():
+    trace = [{"eigenvalue": 1, "op": "R2 <- R2 - R1", "matrix": [[1, 1], [0, 0]]},
+             {"eigenvalue": 3, "op": "R2 <- R2 + R1", "matrix": [[-1, 1], [0, 0]]}]  # A - 3I = [[-1, 1], [1, -1]]
+    assert step_statuses("eigenpairs", EIG, trace) == ["certified", "certified"]
+    assert [grader.grade_claim(EIG, c["claim"]) for c in extract(EIG, trace, None, [])] == ["correct", "correct"]
+
+
+def test_row_equivalent_hint_claims_are_weak_and_fail_hint_verification():
+    claim = {"type": "row_equivalent", "matrix": [[1, 0], [0, 1]]}
+    problem = {"A": [[1, 2], [3, 4]]}
+    assert check_claim(problem, claim) == "weak"
+    assert not verify_hint(problem, "No numbers here.", [claim]).verified
+    assert check_claim(RREF, {"type": "row_equivalent", "matrix": [[1, 3], [0, 0]]}) == "refuted"
+    assert grader.grade_claim(DET, claim) == "weak"
+
+
+def test_a_weak_claim_is_not_a_wrong_claim():
+    stats = score.claim_stats(DET, True, [{"matrix": [[1, 2], [0, -3]]}], {"determinant": -2}, [])
+    assert stats["wrong_claim"] == 0 and stats["n_weakly_graded"] == 1 and stats["n_certified"] == 1
+
+
+def test_final_rref_is_still_certified_because_rref_is_unique():
+    stats = score.claim_stats(RREF, True, [], {"rref": [[1, 2], [0, 0]], "rank": 1}, [])
+    assert stats["n_certified"] == 2 and stats["n_weak"] == 0
 
 
 def test_rq4_refuted_is_decidable_but_not_certified():
@@ -229,6 +300,27 @@ def test_holm_by_hand():
     # Holm keeps the running maximum, so the last becomes 0.06.
     out = holm({"a": 0.01, "b": 0.04, "c": 0.03, "d": 0.005})
     assert out == pytest.approx({"d": 0.02, "a": 0.03, "c": 0.06, "b": 0.06})
+
+
+def test_holm_across_all_eight_by_hand():
+    # Model 1: 0.001, 0.02, 0.03, 0.04. Model 2: 0.002, 0.03, 0.05, 0.5.
+    # Sorted 0.001, 0.002, 0.02, 0.03, 0.03, 0.04, 0.05, 0.5
+    # times  8,     7,     6,    5,    4,    3,    2,    1
+    # gives  0.008, 0.014, 0.12, 0.15, 0.12, 0.12, 0.10, 0.5. Running maximum: the last five are 0.15, 0.15, 0.15, 0.15, 0.5.
+    ps = {"m1": [0.001, 0.02, 0.03, 0.04], "m2": [0.002, 0.03, 0.05, 0.5]}
+    primaries = {tag: {("RQ1", f"c{i}"): {"p": p} for i, p in enumerate(values)} for tag, values in ps.items()}
+    table, notes = score.t8b_all_comparisons(primaries)
+    got = {(r.model, r.comparison): r.holm_p_across_8 for r in table.itertuples()}
+    assert got[("m1", "c0")] == "0.0080" and got[("m2", "c0")] == "0.0140"
+    assert got[("m1", "c1")] == "0.1200"
+    assert got[("m2", "c1")] == got[("m1", "c2")] == got[("m1", "c3")] == got[("m2", "c2")] == "0.1500"
+    assert got[("m2", "c3")] == "0.5000"
+
+
+def test_holm_across_eight_is_blank_with_one_model():
+    primaries = {"m1": {("RQ1", f"c{i}"): {"p": 0.01} for i in range(4)}}
+    table, notes = score.t8b_all_comparisons(primaries)
+    assert (table["holm_p_across_8"] == "").all() and any("blank" in n for n in notes)
 
 
 def test_holm_needs_all_four_registered_comparisons():
@@ -336,12 +428,39 @@ def test_score_says_where_seconds_come_from(tmp_path, monkeypatch):
     assert any("only from Groq synchronous runs" in n for n in tables["T7"][3])
 
 
+def test_a_reply_survives_a_file_briefly_held_by_windows(tmp_path, monkeypatch):
+    real, failures = llm.os.replace, []
+
+    def held(src, dst):
+        if len(failures) < 3:
+            failures.append(1)
+            raise PermissionError("in use")
+        real(src, dst)
+
+    monkeypatch.setattr(llm.os, "replace", held)
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    llm.atomic_write(tmp_path / "x.json", "saved")
+    assert (tmp_path / "x.json").read_text(encoding="utf-8") == "saved" and len(failures) == 3
+
+
+def test_a_file_held_for_good_still_raises(tmp_path, monkeypatch):
+    def held(src, dst):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(llm.os, "replace", held)
+    monkeypatch.setattr(llm.time, "sleep", lambda s: None)
+    with pytest.raises(PermissionError):
+        llm.atomic_write(tmp_path / "x.json", "saved")
+
+
 def test_error_messages_carry_no_organisation_id(tmp_path, monkeypatch):
     def urlopen(req, timeout):
         raise urllib.error.HTTPError("u", 413, "big", {}, io.BytesIO(b"too large in organization `org_01abc9` on tokens"))
 
     monkeypatch.setattr(llm, "CACHE_DIR", tmp_path / "cache")
     monkeypatch.setattr(llm, "LOG_PATH", tmp_path / "calls.jsonl")
+    monkeypatch.setattr(llm, "_next_slot", 0.0)
+    monkeypatch.setenv("LLM_RPM", "100000")
     monkeypatch.setenv("LLM_PROVIDER", "groq")
     monkeypatch.setenv("LLM_MODEL", "m")
     monkeypatch.setenv("GROQ_API_KEY", "k")
@@ -376,6 +495,79 @@ def test_design_tokens_by_hand():
     # D1 270 x 3 = 810. D2 210 x 3 = 630. Ablations 2 x 810 = 1620. Sum 3060 problem-runs.
     out = cost_probe.design_tokens({"OURS": (1, 10)}, {"OURS": (1, 10)})
     assert out == {"input": 3060, "output": 30600}
+
+
+# ---- claim audit
+def _claims(system, topic, n):
+    return [{"model": "m", "system": system, "topic": topic, "problem_id": f"p{i}", "where": "step 0",
+             "claim_text": "t", "extracted_claim": "{}"} for i in range(n)]
+
+
+def test_audit_takes_ten_percent_of_every_stratum_rounded_up():
+    claims = _claims("B1", "inverse", 100) + _claims("B1", "rref_rank", 25) + _claims("OURS", "inverse", 3)
+    counts = Counter((c["system"], c["topic"]) for c in claim_audit.draw(claims))
+    assert counts == {("B1", "inverse"): 10, ("B1", "rref_rank"): 3, ("OURS", "inverse"): 1}
+
+
+def test_audit_sample_is_reproducible():
+    claims = _claims("B1", "inverse", 100)
+    assert claim_audit.draw(claims) == claim_audit.draw(claims)
+
+
+def test_audit_sheets_are_identical_and_have_the_required_columns(tmp_path):
+    claim_audit.write_sheets(_claims("B1", "inverse", 3), "dev", tmp_path)
+    one, two = (pd.read_csv(claim_audit.sheet_path("dev", r, tmp_path)) for r in (1, 2))
+    assert one.equals(two) and len(one) == 3
+    assert {"claim_text", "extracted_claim", "extraction_correct", "notes"} <= set(one.columns)
+
+
+def test_audit_never_overwrites_a_sheet(tmp_path):
+    claim_audit.write_sheets(_claims("B1", "inverse", 3), "dev", tmp_path)
+    with pytest.raises(SystemExit, match="not overwritten"):
+        claim_audit.write_sheets(_claims("B1", "inverse", 3), "dev", tmp_path)
+
+
+def _fill(tmp_path, one, two):
+    claim_audit.write_sheets(_claims("B1", "inverse", len(one)), "dev", tmp_path)
+    for rater, values in ((1, one), (2, two)):
+        path = claim_audit.sheet_path("dev", rater, tmp_path)
+        frame = pd.read_csv(path, dtype=str, keep_default_na=False)
+        frame["extraction_correct"] = values
+        frame.to_csv(path, index=False)
+
+
+def test_audit_agreement_by_hand(tmp_path):
+    # 10 claims, 8 agreed, so 0.8. Rater 1 says y 7 times, rater 2 y 7 times.
+    # Chance = 0.7^2 + 0.3^2 = 0.58. Kappa = (0.8 - 0.58) / 0.42 = 0.5238.
+    one = ["y"] * 6 + ["y", "n"] + ["n", "n"]
+    two = ["y"] * 6 + ["n", "y"] + ["n", "n"]
+    _fill(tmp_path, one, two)
+    result = claim_audit.agreement("dev", tmp_path)
+    assert result["percent_agreement"] == pytest.approx(0.8)
+    assert result["cohen_kappa"] == pytest.approx(0.22 / 0.42)
+    assert result["both_say_correct"] == 6 and len(result["disagreements"]) == 2
+
+
+def test_audit_refuses_unfinished_sheets(tmp_path):
+    _fill(tmp_path, ["y", ""], ["y", "n"])
+    with pytest.raises(SystemExit, match="not y or n"):
+        claim_audit.agreement("dev", tmp_path)
+
+
+def test_audit_reads_real_result_rows(tmp_path):
+    row = {"problem_id": "D1-x", "run": 1, "status": "answered", "answer_json": json.dumps({"determinant": -2}),
+           "trace_json": json.dumps([{"text": "ad-bc", "value": -2}]),
+           "hints_json": json.dumps([{"text": "try it", "claims": [{"type": "trace", "value": 5}]}]),
+           "pred_misconception": ""}
+    pd.DataFrame([row]).to_csv(tmp_path / "B1_d1_dev_run1__groq__m.csv", index=False)
+    original = claim_audit.gen_d1.load
+    claim_audit.gen_d1.load = lambda: [{**DET, "id": "D1-x"}]
+    try:
+        claims = claim_audit.all_claims("dev", tmp_path)
+    finally:
+        claim_audit.gen_d1.load = original
+    assert [c["where"] for c in claims] == ["step 0", "final 0", "hint 0"]
+    assert claims[2]["claim_text"] == "try it" and '"trace"' in claims[2]["extracted_claim"]
 
 
 # ---- Gemini batch mode

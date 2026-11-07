@@ -29,10 +29,11 @@ def _shape(matrix):
         return None
 
 
-def _intermediate(context: str, step: dict, previous: dict, **extra) -> dict:
+def _intermediate(context: str, step: dict, previous: dict, chain: str | None = None, **extra) -> dict:
+    chain = chain or context
     claim = {"type": "intermediate_matrix", "context": context, "matrix": step["matrix"], "op": step.get("op"),
-             "text": step.get("text"), "previous": previous.get(context), **extra}
-    previous[context] = step["matrix"]
+             "text": step.get("text"), "previous": previous.get(chain), **extra}
+    previous[chain] = step["matrix"]
     return claim
 
 
@@ -75,7 +76,8 @@ def _eigen_step(step, previous):
     if "vector" in step and "eigenvalue" in step:
         return {"type": "eigenvector", "eigenvalue": step["eigenvalue"], "vector": step["vector"]}
     if "matrix" in step and "eigenvalue" in step:
-        return _intermediate("A_minus_lambda_I", step, {}, **{"lambda": step["eigenvalue"]})
+        chain = f"lambda={step['eigenvalue']}"  # each eigenvalue has its own reduction
+        return _intermediate("A_minus_lambda_I", step, previous, chain, **{"lambda": step["eigenvalue"]})
     if "vector" in step or "matrix" in step:
         return _statement(step)
     if "eigenvalue" in step or "value" in step:
