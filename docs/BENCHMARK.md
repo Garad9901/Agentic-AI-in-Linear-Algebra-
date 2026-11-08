@@ -15,7 +15,10 @@ The reduced design decided on 2026-11-08 (see [DEVIATIONS.md](DEVIATIONS.md)):
 - **Statistics:** RQ4 coverage comes from the same OURS outputs. The Holm family is the 3 RQ1 comparisons.
 - **Not run:** runs 2 and 3, LinAlg-Bench (D2), B4, the ablations and hints. RQ2 and RQ3 need student data (D3) and are deferred to a later paper.
 
-Provider refusals and truncated responses are logged in `logs/refusals.jsonl` and `logs/truncations.jsonl`. They are set aside and counted, never scored as wrong answers or abstentions.
+Provider refusals and truncated responses are logged in `logs/refusals.jsonl` and `logs/truncations.jsonl`:
+
+- **Truncated** (finish_reason length at the 32K cap): counts as no answer delivered, so it is not correct and contributes no claims. Tables T9 and T9b repeat the analysis without every problem any system truncated, for all systems, so McNemar pairs stay matched.
+- **Refused** after retries: the problem is excluded for every system, and the count is reported under T2.
 
 ## Setup (PowerShell)
 

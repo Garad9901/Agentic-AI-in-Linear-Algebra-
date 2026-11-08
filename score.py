@@ -12,9 +12,14 @@ latutor/stats.py and the per-item majority rule from docs/DEVIATIONS.md.
 
 Reduced design for this paper (decisions of 2026-11-08): one model on Cerebras, the RQ1
 primary comparisons only (OURS vs B1, B2, B3) on D1, run 1, no hints. RQ4 coverage comes
-from the same OURS outputs. Results from any other provider are not scored. Provider
-refusals (status api_error) and truncated responses are set aside and counted, never
-scored as wrong answers or abstentions. Claims are graded by grader.py against the
+from the same OURS outputs. Results from any other provider are not scored.
+
+Decisions of 2026-11-08 on incomplete responses:
+  truncated  (finish_reason length at the 32K cap) counts as no answer delivered: not correct,
+             and no claims for the wrong-claim rate. A sensitivity analysis (T9, T9b) drops every
+             problem on which any system truncated, for all systems, so McNemar pairs stay matched.
+  refused    (status api_error, still failing after retries) excludes the problem for all
+             systems, and the count is reported. Claims are graded by grader.py against the
 ground truth; RQ4 asks the verifier what it can certify, which is a separate question.
 """
 from __future__ import annotations
@@ -42,7 +47,8 @@ RQ1_BASELINES = ["B1", "B2", "B3"]
 RQ2_BASELINE = "DET"  # B4 in prereg-v1; RQ2 is deferred to a later paper
 DESIGN_SYSTEMS = ["B1", "B2", "B3", "OURS"]
 DESIGN_RUNS = (1,)  # one run in this paper, so the "majority" is run 1 itself
-SET_ASIDE = {"api_error": "provider refusal", "truncated": "truncated"}
+REFUSED = "api_error"
+TRUNCATED = "truncated"
 BOOTSTRAP = 10_000
 TRUNCATION_FLAG = 0.01  # above this, truncation may be distorting results
 
@@ -188,7 +194,7 @@ def hints_counted(row) -> bool:
 
 def grade_d1(frame: pd.DataFrame, problems: dict) -> pd.DataFrame:
     """Add grade columns. api_error rows are dropped: they say nothing about a system."""
-    usable = frame[~frame["status"].isin(SET_ASIDE)].copy()
+    usable = frame[frame["status"] != REFUSED].copy()
     correct, wrong, consistent, fabricated, delivered, leaks, verified, with_claim, n_hints = ([] for _ in range(9))
     stats, flagged = [], []
     for _, row in usable.iterrows():
@@ -434,8 +440,7 @@ def t3b_reliability(graded: dict, names: list, raw: dict) -> pd.DataFrame:
         rows.append({
             "system": name,
             "n": n,
-            "provider_refusals_set_aside": int((raw[name]["status"] == "api_error").sum()),
-            "truncated_set_aside": int((raw[name]["status"] == "truncated").sum()),
+            "truncated_no_answer_rate": _ratio(int((f["status"] == TRUNCATED).sum()), n),
             "answered": int(f["delivered"].sum()),
             "wrong_delivered_rate": _ratio(int(f["wrong"].sum()), n),
             "consistent_computation_error_rate": _ratio(int(f["consistent_error"].sum()), n),
@@ -590,6 +595,37 @@ def markdown(frame: pd.DataFrame) -> str:
 REPORTED_PROVIDER = "cerebras"
 
 
+def _keys(frame: pd.DataFrame, mask) -> set:
+    return set(zip(frame.loc[mask, "run"], frame.loc[mask, "problem_id"]))
+
+
+def refused_problems(frames: dict) -> set:
+    """(run, problem) pairs that some system could not complete: excluded for every system."""
+    return set().union(*[_keys(f, f["status"] == REFUSED) for f in frames.values()]) if frames else set()
+
+
+def truncated_problems(frames: dict) -> set:
+    """(run, problem) pairs on which any system had a truncated call."""
+    return set().union(*[_keys(f, f["truncated_calls"] > 0) for f in frames.values()
+                         if "truncated_calls" in f]) if frames else set()
+
+
+def without(frame: pd.DataFrame, pairs: set) -> pd.DataFrame:
+    keep = [(r, p) not in pairs for r, p in zip(frame["run"], frame["problem_id"])]
+    return frame[keep]
+
+
+def t9_sensitivity(graded: dict, names: list, dropped: set, bootstrap: int) -> tuple:
+    """Accuracy, wrong-claim rate and McNemar with every truncated problem removed for all systems."""
+    kept = {name: without(graded[name], dropped) for name in names}
+    rows = [{"system": name, "problems": len(f), "accuracy": _ratio(int(f["correct"].sum()), len(f)),
+             "wrong_claim_rate": _ratio(int(f["wrong_claim"].sum()), len(f))} for name, f in kept.items()]
+    tests, test_notes = t8_tests(kept)
+    notes = [f"Sensitivity analysis: {len(dropped)} problem-runs on which any system truncated are removed for "
+             "all systems, so McNemar pairs stay matched (decision of 2026-11-08)."]
+    return pd.DataFrame(rows), notes, tests, test_notes
+
+
 def model_tags(split: str, results: Path = RESULTS) -> list:
     """Only the reported model. The Gemini code stays, but produces no reported results."""
     return sorted({key[2] for key in load_results(split, results) if key[2].startswith(f"{REPORTED_PROVIDER}__")})
@@ -599,9 +635,11 @@ def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap
     problems = gen_d1.load()
     by_id = {p["id"]: p for p in problems}
     loaded = load_results(split, results)
-    d1 = {name: f for (name, ds, t), f in loaded.items() if ds == "d1" and t == tag}
+    d1 = {name: f for (name, ds, t), f in loaded.items() if ds == "d1" and t == tag and name in DESIGN_SYSTEMS}
     d3 = {name: f for (name, ds, t), f in loaded.items() if ds == "d3" and t == tag}
-    graded = {name: grade_d1(f, by_id) for name, f in d1.items()}
+    refused = refused_problems(d1)
+    truncated = truncated_problems(d1)
+    graded = {name: grade_d1(without(f, refused), by_id) for name, f in d1.items()}
     base = [s for s in DESIGN_SYSTEMS if s in graded and not graded[s].empty]
     graded = {s: f for s, f in graded.items() if s in DESIGN_SYSTEMS and not f.empty}
 
@@ -618,10 +656,10 @@ def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap
     d1_notes = [f"Accuracy is correct / all problems, so an abstention counts as not correct. Split: {split}."]
     if missing:
         d1_notes.append(f"No usable D1 results for {missing}.")
-    excluded = {s: int(d1[s]["status"].isin(SET_ASIDE).sum()) for s in d1 if s in DESIGN_SYSTEMS}
-    if any(excluded.values()):
-        d1_notes.append(f"Systems are NOT comparable here: provider refusals and truncations set problems aside "
-                        f"unevenly {excluded}. Rerun refusals to fill them in; see T3b and T7b.")
+    d1_notes.append(f"Problem-runs excluded for every system because a provider refusal could not be resolved "
+                    f"after retries: {len(refused)}.")
+    d1_notes.append("A truncated response (finish_reason length) counts as no answer delivered: not correct, and no "
+                    "claims. T9 and T9b repeat the analysis without the problems any system truncated.")
     tables.append(("T2", "Accuracy by topic x system", t2_t3_accuracy(graded, "topic", TOPICS, base), d1_notes))
     tables.append(("T3", "Accuracy by size x system", t2_t3_accuracy(graded, "size", SIZES, base), d1_notes))
     tables.append(("T2b", "RQ1 wrong-claim rate", t2b_wrong_claim(graded, base, bootstrap), d1_notes[1:] + [
@@ -661,6 +699,9 @@ def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap
     tables.append(("T7b", "Truncation rate by system and size", frame, notes))
     frame, notes = t8_tests(graded)
     tables.append(("T8", "McNemar tests with Holm correction (primary family)", frame, notes))
+    frame, notes, tests, test_notes = t9_sensitivity(graded, base, truncated, bootstrap)
+    tables.append(("T9", "Sensitivity: truncated problems removed for all systems", frame, notes))
+    tables.append(("T9b", "Sensitivity: McNemar with truncated problems removed", tests, notes + test_notes))
     return tables
 
 

@@ -665,20 +665,72 @@ def _one_truncated_call(monkeypatch):
     monkeypatch.setattr(run, "_usage", lambda calls: {**real([]), "truncated_calls": 1})
 
 
-def test_a_truncated_response_is_set_aside_not_scored(monkeypatch):
+def test_a_truncated_response_is_marked_truncated(monkeypatch):
     monkeypatch.setattr(run, "run_system", lambda *a: {"status": "parse_error"})
     _one_truncated_call(monkeypatch)
     row = run.run_one("B1", {"id": "D1-x", "topic": "determinant", "size": 3}, [], 1)
     assert row["status"] == "truncated"
-    graded = score.grade_d1(pd.DataFrame([
-        {**_ours_row("answered", {"determinant": -2}, [], None), "flags_json": "null"},
-        {**_ours_row("truncated", None, None, None), "flags_json": "null"},
-        {**_ours_row("api_error", None, None, None), "flags_json": "null"}]), {"D1-d": DET})
-    assert len(graded) == 1  # refusals and truncations are never scored
-    table = score.t3b_reliability({"B1": graded}, ["B1"], {"B1": pd.DataFrame(
-        [{"status": "answered"}, {"status": "truncated"}, {"status": "api_error"}])})
-    row = table.iloc[0]
-    assert (row["provider_refusals_set_aside"], row["truncated_set_aside"]) == (1, 1)
+
+
+def test_truncation_counts_as_no_answer_delivered():
+    rows = [{**_ours_row("answered", {"determinant": -2}, [], None), "flags_json": "null"},
+            {**_ours_row("truncated", None, None, None, pid="D1-e"), "flags_json": "null"}]
+    graded = score.grade_d1(pd.DataFrame(rows), {"D1-d": DET, "D1-e": DET})
+    assert len(graded) == 2  # kept, not set aside
+    t = graded[graded["status"] == "truncated"].iloc[0]
+    assert not t["correct"] and not t["delivered"] and t["n_claims"] == 0 and t["wrong_claim"] == 0
+    table = score.t3b_reliability({"B1": graded}, ["B1"], {"B1": graded})
+    assert table.iloc[0]["truncated_no_answer_rate"] == "0.500 (1/2)"
+
+
+def _frame(statuses, truncated_calls=None):
+    truncated_calls = truncated_calls or [0] * len(statuses)
+    return pd.DataFrame({"run": 1, "problem_id": [f"p{i}" for i in range(len(statuses))], "status": statuses,
+                         "truncated_calls": truncated_calls})
+
+
+def test_a_refusal_excludes_that_problem_for_every_system():
+    frames = {"OURS": _frame(["answered", "api_error", "answered"]), "B1": _frame(["answered"] * 3)}
+    refused = score.refused_problems(frames)
+    assert refused == {(1, "p1")}
+    assert [list(score.without(f, refused)["problem_id"]) for f in frames.values()] == [["p0", "p2"]] * 2
+
+
+def test_the_sensitivity_set_is_any_system_truncating():
+    frames = {"OURS": _frame(["answered"] * 3, [0, 1, 0]), "B1": _frame(["truncated", "answered", "answered"], [1, 0, 0])}
+    assert score.truncated_problems(frames) == {(1, "p0"), (1, "p1")}
+
+
+def test_sensitivity_drops_the_same_problems_for_every_system_by_hand():
+    # 4 problems. p0 truncated by B1 only. Primary: OURS wrong on p3; B1 wrong on p1, p2 and truncated on p0.
+    # Without p0, both systems keep p1, p2, p3: OURS-only events 1 (p3), B1-only events 2 (p1, p2).
+    def graded(wrong, correct, statuses):
+        return pd.DataFrame({"run": 1, "problem_id": [f"p{i}" for i in range(4)], "wrong_claim": wrong,
+                             "correct": correct, "status": statuses})
+    frames = {"OURS": graded([0, 0, 0, 1], [True, True, True, False], ["answered"] * 4),
+              "B1": graded([0, 1, 1, 0], [False, False, False, True], ["truncated"] + ["answered"] * 3)}
+    table, notes, tests, _ = score.t9_sensitivity(frames, ["OURS", "B1"], {(1, "p0")}, bootstrap=100)
+    assert list(table["problems"]) == [3, 3]
+    assert list(table["accuracy"]) == ["0.667 (2/3)", "0.333 (1/3)"]
+    primary = tests[(tests["pairing"] == "primary") & (tests["comparison"] == "OURS vs B1")].iloc[0]
+    assert (primary["n_pairs"], primary["s0_only"], primary["baseline_only"]) == (3, 1, 2)
+
+
+def test_build_reports_refusals_and_has_the_sensitivity_tables(tmp_path):
+    base = {"run": 1, "topic": "determinant", "size": 3, "mode": "sync", "answer_json": json.dumps({"determinant": 9}),
+            "trace_json": "[]", "hints_json": "[]", "flags_json": "null", "pred_misconception": "", "truncated_calls": 0,
+            "llm_calls": 1, "input_tokens": 1, "output_tokens": 1, "llm_seconds": 0, "local_seconds": 0,
+            "parse_failures": 0, "rate_limit_errors": 0}
+    import data.gen_d1 as gen
+    ids = [p["id"] for p in gen.load() if p["split"] == "dev"][:2]
+    for system in ("OURS", "B1"):
+        statuses = ["api_error", "answered"] if system == "OURS" else ["answered", "answered"]
+        pd.DataFrame([{**base, "problem_id": i, "status": s} for i, s in zip(ids, statuses)]).to_csv(
+            tmp_path / f"{system}_d1_dev_run1__cerebras__gpt-oss-120b.csv", index=False)
+    tables = {t[0]: t for t in score.build("dev", "cerebras__gpt-oss-120b", tmp_path, bootstrap=100)}
+    assert any("could not be resolved after retries: 1" in n for n in tables["T2"][3])
+    assert list(tables["T3b"][2]["n"]) == [1, 1]  # the refused problem is gone for both systems
+    assert {"T9", "T9b"} <= set(tables)
 
 
 def test_an_answered_response_with_a_truncated_repair_stays_answered(monkeypatch):
