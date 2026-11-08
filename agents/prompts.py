@@ -97,9 +97,13 @@ def single_llm(problem: dict) -> str:
                 "Then write three graded hints for the student.\n")
         head = '{"first_wrong_step": k or null, "misconception": label or null, '
     else:
-        task = (f"Problem:\n{problem['problem']}\n\nSolve the problem. Then write three graded hints for a student "
-                "who is stuck on it and has not started.\n")
-        head = "{"
+        # No hints on D1 or D2 in this paper (decision of 2026-11-08): solve only.
+        return ("You are a linear algebra tutor.\n\n"
+                f"Problem:\n{problem['problem']}\n\nSolve the problem.\n\n"
+                "Work out the real values. Every field must hold computed numbers, never a placeholder or null.\n"
+                "Reply with one JSON object only, no prose:\n"
+                f'{{"steps": [...], "answer": {ANSWER_FORMAT[topic]}}}\n'
+                f'Each entry of "steps" has this form: {STEP_FORMAT[topic]}.\n{OP_RULES}\n{NUMBERS}')
     levels = "\n".join(HINT_LEVELS[k] for k in (1, 2, 3))
     return ("You are a linear algebra tutor.\n\n" + task + f"{levels}\n{HINT_RULES}\n\n"
             "Work out the real values. Every field must hold computed numbers, never a placeholder or null.\n"

@@ -20,7 +20,7 @@ import score
 from extraction import extract
 from latutor.stats import holm, mcnemar
 from scripts import cost_probe
-from tools import annotation_sheet, claim_audit
+from tools import annotation_sheet, claim_audit, run_until_done
 import d3
 from verifier import check_claim, step_statuses, verify_hint
 
@@ -307,10 +307,10 @@ def test_there_is_no_across_8_table_any_more():
     assert not hasattr(score, "t8b_all_comparisons")
 
 
-def test_only_the_groq_model_is_scored(tmp_path):
-    for tag in ("groq__openai-gpt-oss-120b", "gemini__gemini-3.8-flash"):
+def test_only_the_cerebras_model_is_scored(tmp_path):
+    for tag in ("groq__openai-gpt-oss-120b", "gemini__gemini-3.8-flash", "cerebras__gpt-oss-120b"):
         (tmp_path / f"B1_d1_dev_run1__{tag}.csv").write_text("problem_id\n", encoding="utf-8")
-    assert score.model_tags("dev", tmp_path) == ["groq__openai-gpt-oss-120b"]
+    assert score.model_tags("dev", tmp_path) == ["cerebras__gpt-oss-120b"]
 
 
 def test_holm_needs_all_four_registered_comparisons():
@@ -329,23 +329,39 @@ def test_majority_rule_by_hand():
     # p1: OURS event in 2 of 3 (yes), baseline in 3 of 3 (yes): concordant.
     a = _runs({1: [1, 1], 2: [0, 1], 3: [0, 0]})
     b = _runs({1: [1, 1], 2: [1, 1], 3: [0, 1]})
-    majority, per_run = score.paired_tests(a, b, "m")
+    majority, per_run = score.paired_tests(a, b, "m", runs=(1, 2, 3))
     assert (majority["b"], majority["c"], majority["n_pairs"]) == (0, 1, 2)
     assert sorted(per_run) == [1, 2, 3]
 
 
 def test_majority_is_blank_until_three_runs_exist():
     a, b = _runs({1: [1, 0]}), _runs({1: [0, 0]})
-    majority, per_run = score.paired_tests(a, b, "m")
+    majority, per_run = score.paired_tests(a, b, "m", runs=(1, 2, 3))
     assert majority is None and per_run[1]["b"] == 1
+
+
+def test_with_one_run_the_primary_test_is_run_1():
+    a, b = _runs({1: [1, 0, 0]}), _runs({1: [0, 1, 1]})
+    primary, per_run = score.paired_tests(a, b, "m")  # the design has run 1 only
+    assert (primary["b"], primary["c"]) == (1, 2) and primary == per_run[1]
+
+
+def test_holm_family_is_the_three_rq1_comparisons_run():
+    rows = {s: _runs({1: [int(s == "OURS"), 0]}) for s in ("OURS", "B1", "B2", "B3")}
+    for frame in rows.values():
+        frame["wrong_claim"] = frame.pop("m")
+    table, notes = score.t8_tests(rows)
+    primary = table[table["pairing"] == "primary"]
+    assert list(primary["comparison"]) == ["OURS vs B1", "OURS vs B2", "OURS vs B3"]
+    assert (primary["holm_p"] != "").all() and "RQ2" not in set(table["rq"])
 
 
 def test_t8_without_d3_leaves_rq2_and_holm_blank():
     a, b = _runs({1: [1, 0]}), _runs({1: [0, 1]})
     a["wrong_claim"] = a.pop("m")
     b["wrong_claim"] = b.pop("m")
-    table, notes = score.t8_tests({"OURS": a, "B1": b}, {})
-    assert (table["holm_p"] == "").all() and any("needs D3" in n for n in notes)
+    table, notes = score.t8_tests({"OURS": a, "B1": b})
+    assert (table["holm_p"] == "").all() and any("blank" in n for n in notes)
     assert list(table[table["pairing"] == "run1"]["comparison"]) == ["OURS vs B1"]
 
 
@@ -415,7 +431,7 @@ def test_t7_seconds_come_only_from_synchronous_runs():
 
 def test_score_says_where_seconds_come_from(tmp_path, monkeypatch):
     tables = {t[0]: t for t in score.build("dev", None, tmp_path, bootstrap=100)}
-    assert any("only from Groq synchronous runs" in n for n in tables["T7"][3])
+    assert any("Batch runs record no latency" in n for n in tables["T7"][3])
 
 
 def test_a_reply_survives_a_file_briefly_held_by_windows(tmp_path, monkeypatch):
@@ -473,6 +489,236 @@ def test_score_skips_a_system_with_no_usable_rows(tmp_path):
 def test_cost_summary_handles_a_system_with_no_usable_rows():
     frame = pd.DataFrame([{"status": "api_error", "llm_calls": 0}])
     assert cost_probe.summary_row("B2", frame) == {"system": "B2", "problems": 0, "api_errors": 1}
+
+
+# ---- working within one Groq key
+@pytest.mark.parametrize("text,want", [
+    ("Please try again in 2.345s.", 2.345),
+    ("Please try again in 1m30s.", 90.0),
+    ("Please try again in 7m12.5s.", 432.5),
+    ("Please try again in 1h2m3s.", 3723.0),
+    ("Please try again in 450ms.", 0.45),
+    ("Please retry in 2h39m41.556s.", 9581.556),
+    ("no hint here", None),
+])
+def test_parse_wait(text, want):
+    got = llm.parse_wait(text)
+    assert got == pytest.approx(want) if want is not None else got is None
+
+
+@pytest.fixture
+def groq(tmp_path, monkeypatch):
+    monkeypatch.setattr(llm, "CACHE_DIR", tmp_path / "cache")
+    monkeypatch.setattr(llm, "LOG_PATH", tmp_path / "calls.jsonl")
+    monkeypatch.setattr(llm, "_next_slot", 0.0)
+    monkeypatch.setenv("LLM_RPM", "100000")
+    monkeypatch.setenv("LLM_PROVIDER", "groq")
+    monkeypatch.setenv("LLM_MODEL", "m")
+    monkeypatch.setenv("GROQ_API_KEY", "k")
+    monkeypatch.delenv("LLM_WAIT_DAILY", raising=False)
+    waits = []
+    monkeypatch.setattr(llm.time, "sleep", lambda s: waits.append(s))
+    return waits
+
+
+def _ok():
+    body = {"choices": [{"message": {"content": "fine"}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}
+
+    class R(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    return R(json.dumps(body).encode())
+
+
+def _error(code, message):
+    return urllib.error.HTTPError("u", code, "x", {}, io.BytesIO(json.dumps({"error": {"message": message}}).encode()))
+
+
+TPM_413 = ("Request too large for model `m` in organization `org_abc` service tier `on_demand` on tokens per minute "
+           "(TPM): Limit 8000, Requested 17997, please reduce your message size and try again.")
+
+
+def test_a_413_from_a_per_minute_deficit_is_waited_out(groq, monkeypatch):
+    replies = [_error(413, TPM_413), _error(429, "Rate limit reached on tokens per minute (TPM). Please try again in 2.5s."), None]
+
+    def urlopen(req, timeout):
+        reply = replies.pop(0)
+        if reply is not None:
+            raise reply
+        return _ok()
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", urlopen)
+    with llm.track() as calls:
+        assert llm.call_llm("solver", "p") == "fine"
+    assert calls[0]["rate_limit_errors"] == 2
+    assert [w for w in groq if w >= 1] == [61.0, 3.5]  # 60 s when no hint is given, then the hint plus 1 s
+
+
+def test_a_413_that_is_not_about_the_minute_budget_still_fails(groq, monkeypatch):
+    def urlopen(req, timeout):
+        raise _error(413, "Request body too large")
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", urlopen)
+    with pytest.raises(llm.LLMError, match="HTTP 413"):
+        llm.call_llm("solver", "p")
+
+
+DAILY = "Rate limit reached on tokens per day (TPD): Limit 200000, Used 199000. Please try again in 7m12.5s."
+
+
+def test_a_daily_cap_stops_the_run_by_default(groq, monkeypatch):
+    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda req, timeout: (_ for _ in ()).throw(_error(429, DAILY)))
+    with pytest.raises(llm.LLMError, match="daily quota"):
+        llm.call_llm("solver", "p")
+
+
+def test_wait_daily_sleeps_until_the_reset_then_carries_on(groq, monkeypatch):
+    replies = [_error(429, DAILY), None]
+
+    def urlopen(req, timeout):
+        reply = replies.pop(0)
+        if reply is not None:
+            raise reply
+        return _ok()
+
+    monkeypatch.setenv("LLM_WAIT_DAILY", "1")
+    monkeypatch.setattr(llm.urllib.request, "urlopen", urlopen)
+    assert llm.call_llm("solver", "p") == "fine"
+    assert 437.5 in groq  # 7m12.5s plus 5 s
+
+
+# ---- Cerebras and the scheduler (decision of 2026-11-08)
+def test_cerebras_gets_its_free_tier_output_cap_and_key(monkeypatch):
+    monkeypatch.setenv("LLM_PROVIDER", "cerebras")
+    monkeypatch.setenv("LLM_MODEL", "gpt-oss-120b")
+    monkeypatch.delenv("LLM_MAX_TOKENS", raising=False)
+    cfg = llm._settings()
+    assert cfg["max_tokens"] == 32768 and cfg["max_tokens"] > 18000  # a 5x5 reply needs about 18K
+    assert cfg["key_env"] == "CEREBRAS_API_KEY" and cfg["base"] == "https://api.cerebras.ai/v1"
+
+
+def test_cache_keys_never_mix_providers():
+    assert llm.cache_key("cerebras", "gpt-oss-120b", 1, "p") != llm.cache_key("groq", "gpt-oss-120b", 1, "p")
+
+
+@pytest.mark.parametrize("headers,want", [
+    ({"x-ratelimit-remaining-tokens-day": "0", "x-ratelimit-reset-tokens-day": "3600.5"}, 3600.5),
+    ({"x-ratelimit-remaining-requests-day": "0", "x-ratelimit-reset-requests-day": "1h2m3s"}, 3723.0),
+    ({"x-ratelimit-remaining-tokens-day": "5000", "x-ratelimit-reset-tokens-day": "10"}, None),
+    ({"x-ratelimit-remaining-tokens-minute": "0", "x-ratelimit-reset-tokens-minute": "10"}, None),
+    ({}, None),
+])
+def test_daily_reset_from_headers(headers, want):
+    assert llm.daily_reset(headers) == want
+
+
+def test_a_daily_cap_seen_only_in_headers_is_waited_out(groq, monkeypatch):
+    headers = {"x-ratelimit-remaining-tokens-day": "0", "x-ratelimit-reset-tokens-day": "120"}
+    replies = [urllib.error.HTTPError("u", 429, "x", headers, io.BytesIO(b'{"message": "Too many tokens"}')), None]
+
+    def urlopen(req, timeout):
+        reply = replies.pop(0)
+        if reply is not None:
+            raise reply
+        return _ok()
+
+    monkeypatch.setenv("LLM_WAIT_DAILY", "1")
+    monkeypatch.setattr(llm.urllib.request, "urlopen", urlopen)
+    assert llm.call_llm("solver", "p") == "fine" and 125 in groq
+
+
+def test_refusals_are_logged_separately(groq, monkeypatch, tmp_path):
+    monkeypatch.setattr(llm, "REFUSALS_PATH", tmp_path / "refusals.jsonl")
+    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda req, timeout: (_ for _ in ()).throw(_error(400, "bad")))
+    with pytest.raises(llm.LLMError):
+        llm.call_llm("solver", "p")
+    record = json.loads((tmp_path / "refusals.jsonl").read_text(encoding="utf-8"))
+    assert record["code"] == 400 and record["provider"] == "groq"
+
+
+def test_truncations_are_logged_separately(groq, monkeypatch, tmp_path):
+    monkeypatch.setattr(llm, "TRUNCATIONS_PATH", tmp_path / "truncations.jsonl")
+    cut = {"choices": [{"message": {"content": "{\"a\""}, "finish_reason": "length"}],
+           "usage": {"prompt_tokens": 1, "completion_tokens": 9, "total_tokens": 10}}
+    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda req, timeout: io.BytesIO(json.dumps(cut).encode()))
+
+    class R(io.BytesIO):
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(llm.urllib.request, "urlopen", lambda req, timeout: R(json.dumps(cut).encode()))
+    llm.call_llm("solver", "p")
+    record = json.loads((tmp_path / "truncations.jsonl").read_text(encoding="utf-8"))
+    assert record["role"] == "solver" and record["total_tokens"] == 10
+
+
+def _one_truncated_call(monkeypatch):
+    real = run._usage
+    monkeypatch.setattr(run, "_usage", lambda calls: {**real([]), "truncated_calls": 1})
+
+
+def test_a_truncated_response_is_set_aside_not_scored(monkeypatch):
+    monkeypatch.setattr(run, "run_system", lambda *a: {"status": "parse_error"})
+    _one_truncated_call(monkeypatch)
+    row = run.run_one("B1", {"id": "D1-x", "topic": "determinant", "size": 3}, [], 1)
+    assert row["status"] == "truncated"
+    graded = score.grade_d1(pd.DataFrame([
+        {**_ours_row("answered", {"determinant": -2}, [], None), "flags_json": "null"},
+        {**_ours_row("truncated", None, None, None), "flags_json": "null"},
+        {**_ours_row("api_error", None, None, None), "flags_json": "null"}]), {"D1-d": DET})
+    assert len(graded) == 1  # refusals and truncations are never scored
+    table = score.t3b_reliability({"B1": graded}, ["B1"], {"B1": pd.DataFrame(
+        [{"status": "answered"}, {"status": "truncated"}, {"status": "api_error"}])})
+    row = table.iloc[0]
+    assert (row["provider_refusals_set_aside"], row["truncated_set_aside"]) == (1, 1)
+
+
+def test_an_answered_response_with_a_truncated_repair_stays_answered(monkeypatch):
+    monkeypatch.setattr(run, "run_system", lambda *a: {"status": "answered"})
+    _one_truncated_call(monkeypatch)
+    assert run.run_one("B1", {"id": "D1-x", "topic": "determinant", "size": 3}, [], 1)["status"] == "answered"
+
+
+def test_runner_retries_until_no_refusals_remain(tmp_path, monkeypatch):
+    path = tmp_path / "rows.csv"
+    states = [["api_error", "answered"], ["answered", "answered"]]
+    launches = []
+
+    def launch(command, cwd):
+        launches.append(command)
+        pd.DataFrame({"status": states[len(launches) - 1]}).to_csv(path, index=False)
+
+    monkeypatch.setattr(run_until_done, "result_path", lambda *a: path)
+    monkeypatch.setattr(run_until_done, "model_for", lambda p: "m")
+    args = type("A", (), {"provider": "cerebras", "dataset": "d1", "split": "dev", "run": 1, "workers": 2, "limit": None})
+    assert run_until_done.run_system("B1", args, 2, launch=launch, sleep=lambda s: None)
+    assert len(launches) == 2 and "--wait-daily" in launches[0]
+
+
+def test_runner_gives_up_when_nothing_moves(tmp_path, monkeypatch):
+    path = tmp_path / "rows.csv"
+
+    def launch(command, cwd):
+        pd.DataFrame({"status": ["api_error"]}).to_csv(path, index=False)
+
+    monkeypatch.setattr(run_until_done, "result_path", lambda *a: path)
+    monkeypatch.setattr(run_until_done, "model_for", lambda p: "m")
+    args = type("A", (), {"provider": "cerebras", "dataset": "d1", "split": "dev", "run": 1, "workers": 2, "limit": None})
+    assert not run_until_done.run_system("B1", args, 1, launch=launch, sleep=lambda s: None)
+
+
+def test_truncated_rows_are_final_for_the_runner(tmp_path):
+    path = tmp_path / "rows.csv"
+    pd.DataFrame({"status": ["truncated", "answered"]}).to_csv(path, index=False)
+    assert run_until_done.refused_rows(path, 2) == 0
 
 
 # ---- cost arithmetic

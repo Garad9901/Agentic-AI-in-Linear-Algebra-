@@ -6,7 +6,7 @@ Provider groq, model openai/gpt-oss-120b, D1 dev, run 1.
 
 | system | problems | api_errors | mean_calls | mean_input_tokens | mean_output_tokens | mean_seconds | parse_failures | truncation_rate | rate_limit_retries |
 |---|---|---|---|---|---|---|---|---|---|
-| B1 | 6 | 4 | 1.00 | 710 | 7030 | 15.3 | 0/6 | 0.000 (0/6) | 2.0 |
+| B1 | 19 | 0 | 1.00 | 723 | 8652 | 18.1 | 0/19 | 0.000 (0/19) | 29.0 |
 | B2 | 0 | 3 |  |  |  |  |  |  |  |
 | B3 | 0 | 3 |  |  |  |  |  |  |  |
 | B4 | 0 | 3 |  |  |  |  |  |  |  |

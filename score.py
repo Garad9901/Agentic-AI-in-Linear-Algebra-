@@ -10,8 +10,11 @@ The pre-registered metrics are RQ1 wrong-claim rate (T2b), RQ4 coverage (T3d) an
 McNemar tests with Holm correction across the 4 registered comparisons (T8). They use
 latutor/stats.py and the per-item majority rule from docs/DEVIATIONS.md.
 
-All reported results come from one model, the Groq one (decision of 2026-11-07). Results
-from any other provider are not scored. Claims are graded by grader.py against the
+Reduced design for this paper (decisions of 2026-11-08): one model on Cerebras, the RQ1
+primary comparisons only (OURS vs B1, B2, B3) on D1, run 1, no hints. RQ4 coverage comes
+from the same OURS outputs. Results from any other provider are not scored. Provider
+refusals (status api_error) and truncated responses are set aside and counted, never
+scored as wrong answers or abstentions. Claims are graded by grader.py against the
 ground truth; RQ4 asks the verifier what it can certify, which is a separate question.
 """
 from __future__ import annotations
@@ -36,8 +39,10 @@ TOPICS = gen_d1.TOPICS
 SIZES = gen_d1.SIZES
 S0 = "OURS"  # S0 in prereg-v1
 RQ1_BASELINES = ["B1", "B2", "B3"]
-RQ2_BASELINE = "DET"  # B4 in prereg-v1
-MIN_RUNS_AGREEING = 2  # per-item majority: an event in >= 2 of 3 runs
+RQ2_BASELINE = "DET"  # B4 in prereg-v1; RQ2 is deferred to a later paper
+DESIGN_SYSTEMS = ["B1", "B2", "B3", "OURS"]
+DESIGN_RUNS = (1,)  # one run in this paper, so the "majority" is run 1 itself
+SET_ASIDE = {"api_error": "provider refusal", "truncated": "truncated"}
 BOOTSTRAP = 10_000
 TRUNCATION_FLAG = 0.01  # above this, truncation may be distorting results
 
@@ -183,7 +188,7 @@ def hints_counted(row) -> bool:
 
 def grade_d1(frame: pd.DataFrame, problems: dict) -> pd.DataFrame:
     """Add grade columns. api_error rows are dropped: they say nothing about a system."""
-    usable = frame[frame["status"] != "api_error"].copy()
+    usable = frame[~frame["status"].isin(SET_ASIDE)].copy()
     correct, wrong, consistent, fabricated, delivered, leaks, verified, with_claim, n_hints = ([] for _ in range(9))
     stats, flagged = [], []
     for _, row in usable.iterrows():
@@ -291,8 +296,11 @@ def t3d_coverage(frame, bootstrap: int) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=columns, dtype=object).fillna("")
 
 
-def paired_tests(a: pd.DataFrame, b: pd.DataFrame, metric: str) -> tuple:
-    """(majority result or None, {run: result}), each from latutor.stats.mcnemar."""
+def paired_tests(a: pd.DataFrame, b: pd.DataFrame, metric: str, runs=DESIGN_RUNS) -> tuple:
+    """(majority result or None, {run: result}), each from latutor.stats.mcnemar.
+
+    The majority is an event in more than half of `runs`; with one run it is that run.
+    """
     left = a.set_index(["run", "problem_id"])[metric].to_dict()
     right = b.set_index(["run", "problem_id"])[metric].to_dict()
     per_run = {}
@@ -301,11 +309,12 @@ def paired_tests(a: pd.DataFrame, b: pd.DataFrame, metric: str) -> tuple:
         if items:
             per_run[run] = mcnemar([left[(run, i)] for i in items], [right[(run, i)] for i in items])
     problems = {k[1] for k in left}
-    complete = sorted(i for i in problems if all((r, i) in left and (r, i) in right for r in RUNS))
+    complete = sorted(i for i in problems if all((r, i) in left and (r, i) in right for r in runs))
     if not complete:
         return None, per_run
-    x = [int(sum(left[(r, i)] for r in RUNS) >= MIN_RUNS_AGREEING) for i in complete]
-    y = [int(sum(right[(r, i)] for r in RUNS) >= MIN_RUNS_AGREEING) for i in complete]
+    need = len(runs) // 2 + 1
+    x = [int(sum(left[(r, i)] for r in runs) >= need) for i in complete]
+    y = [int(sum(right[(r, i)] for r in runs) >= need) for i in complete]
     return mcnemar(x, y), per_run
 
 
@@ -325,8 +334,8 @@ def holm_family(primary: dict, size: int = 4) -> dict:
     return {k: _num(v, 4) for k, v in holm({k: r["p"] for k, r in primary.items()}).items()}
 
 
-def primary_results(graded: dict, rq2: dict) -> tuple:
-    """(majority, per_run) for the 4 registered comparisons of one model."""
+def primary_results(graded: dict) -> tuple:
+    """(primary result, per_run) for the RQ1 comparisons actually run: the Holm family."""
     majority, per_run = {}, {}
     for base in RQ1_BASELINES:
         key = ("RQ1", f"{S0} vs {base}")
@@ -334,32 +343,26 @@ def primary_results(graded: dict, rq2: dict) -> tuple:
             majority[key], per_run[key] = paired_tests(graded[S0], graded[base], "wrong_claim")
         else:
             majority[key], per_run[key] = None, {}
-    key = ("RQ2", f"{S0} vs {RQ2_BASELINE}")
-    if S0 in rq2 and RQ2_BASELINE in rq2:
-        majority[key], per_run[key] = paired_tests(rq2[S0], rq2[RQ2_BASELINE], "first_error_wrong")
-    else:
-        majority[key], per_run[key] = None, {}
     return majority, per_run
 
 
-def t8_tests(graded: dict, rq2: dict) -> tuple[pd.DataFrame, list]:
-    majority, per_run = primary_results(graded, rq2)
-    adjusted = holm_family(majority)
+def t8_tests(graded: dict) -> tuple[pd.DataFrame, list]:
+    majority, per_run = primary_results(graded)
+    adjusted = holm_family(majority, len(RQ1_BASELINES))
     rows = []
     for key, result in majority.items():
-        rows.append(_test_row(key[0], key[1], "majority", result, adjusted.get(key, "")))
+        rows.append(_test_row(key[0], key[1], "primary", result, adjusted.get(key, "")))
         for run, res in per_run[key].items():
             rows.append(_test_row(key[0], key[1], f"run{run}", res))
     columns = ["rq", "comparison", "pairing", "n_pairs", "s0_only", "baseline_only", "p", "method", "odds_ratio",
                "or_ci_low", "or_ci_high", "holm_p"]
-    notes = ["One model family only (decision of 2026-11-07), so the family is the 4 registered comparisons.",
-             "Primary pairing is per-item majority: an event in at least 2 of 3 runs. It stays blank until both "
-             "systems have all 3 runs. Per-run rows are the sensitivity analysis and take no correction.",
+    notes = ["Holm family: the 3 RQ1 comparisons actually run (decision of 2026-11-08). RQ2 is deferred.",
+             "One run, so the primary test is run 1 and there is no run-to-run variance. The registered "
+             "sample-size reasoning assumed 3 runs; the paper reports this as a limitation.",
              "s0_only and baseline_only are the discordant pairs. Odds ratio is s0_only / baseline_only, with an "
              "exact 95% CI, so below 1 favours OURS."]
     if not adjusted:
-        notes.append("holm_p is blank: Holm runs across all 4 registered comparisons, and at least one has no "
-                     "majority p-value yet. RQ2 needs D3.")
+        notes.append("holm_p is blank until all 3 comparisons have a p-value.")
     return pd.DataFrame(rows, columns=columns, dtype=object).fillna(""), notes
 
 
@@ -431,7 +434,8 @@ def t3b_reliability(graded: dict, names: list, raw: dict) -> pd.DataFrame:
         rows.append({
             "system": name,
             "n": n,
-            "api_errors_excluded": int((raw[name]["status"] == "api_error").sum()),
+            "provider_refusals_set_aside": int((raw[name]["status"] == "api_error").sum()),
+            "truncated_set_aside": int((raw[name]["status"] == "truncated").sum()),
             "answered": int(f["delivered"].sum()),
             "wrong_delivered_rate": _ratio(int(f["wrong"].sum()), n),
             "consistent_computation_error_rate": _ratio(int(f["consistent_error"].sum()), n),
@@ -583,7 +587,7 @@ def markdown(frame: pd.DataFrame) -> str:
     return "\n".join([head, rule, *body])
 
 
-REPORTED_PROVIDER = "groq"
+REPORTED_PROVIDER = "cerebras"
 
 
 def model_tags(split: str, results: Path = RESULTS) -> list:
@@ -598,8 +602,8 @@ def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap
     d1 = {name: f for (name, ds, t), f in loaded.items() if ds == "d1" and t == tag}
     d3 = {name: f for (name, ds, t), f in loaded.items() if ds == "d3" and t == tag}
     graded = {name: grade_d1(f, by_id) for name, f in d1.items()}
-    base = [s for s in SYSTEMS if s in graded and not graded[s].empty]
-    graded = {s: f for s, f in graded.items() if not f.empty}
+    base = [s for s in DESIGN_SYSTEMS if s in graded and not graded[s].empty]
+    graded = {s: f for s, f in graded.items() if s in DESIGN_SYSTEMS and not f.empty}
 
     d3_frame, d3_note = None, ""
     try:
@@ -610,14 +614,14 @@ def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap
     tables = []
     frame, notes = t1_dataset(problems, d3_frame, d3_note)
     tables.append(("T1", "Dataset statistics", frame, notes))
-    missing = [s for s in SYSTEMS if s not in graded]
+    missing = [s for s in DESIGN_SYSTEMS if s not in graded]
     d1_notes = [f"Accuracy is correct / all problems, so an abstention counts as not correct. Split: {split}."]
     if missing:
         d1_notes.append(f"No usable D1 results for {missing}.")
-    excluded = {s: int((d1[s]["status"] == "api_error").sum()) for s in d1}
+    excluded = {s: int(d1[s]["status"].isin(SET_ASIDE).sum()) for s in d1 if s in DESIGN_SYSTEMS}
     if any(excluded.values()):
-        d1_notes.append(f"Systems are NOT comparable here: API errors removed problems unevenly {excluded}. "
-                        "Rerun to fill them in.")
+        d1_notes.append(f"Systems are NOT comparable here: provider refusals and truncations set problems aside "
+                        f"unevenly {excluded}. Rerun refusals to fill them in; see T3b and T7b.")
     tables.append(("T2", "Accuracy by topic x system", t2_t3_accuracy(graded, "topic", TOPICS, base), d1_notes))
     tables.append(("T3", "Accuracy by size x system", t2_t3_accuracy(graded, "size", SIZES, base), d1_notes))
     tables.append(("T2b", "RQ1 wrong-claim rate", t2b_wrong_claim(graded, base, bootstrap), d1_notes[1:] + [
@@ -646,38 +650,16 @@ def build(split: str, tag: str | None = None, results: Path = RESULTS, bootstrap
     tables.append(("T3c", "Fabricated rate by topic", t3c_fabricated(graded, base), [
         "n/a: the topic has no surface check.",
     ]))
-    frame, notes = t4_student(d3, d3_frame)
-    if d3_frame is None:
-        notes = [f"Blank: {d3_note}. T4 needs real student solutions, which must not be invented."]
-    elif not d3:
-        notes.append("Blank: D3 data exists but no system has been run on it.")
-    tables.append(("T4", "First wrong step, step F1, misconception macro-F1 (D3)", frame, notes))
-    frame, notes = t4b_kappa(d3_frame)
-    if d3_frame is None:
-        notes = [f"Blank: {d3_note}."]
-    tables.append(("T4b", "Cohen's kappa between the two D3 annotators", frame, notes))
-    tables.append(("T5", "Hint leak rate and hint-verified rate", t5_hints(graded, base), [
-        "D1 hints are exploratory and counted in run 1 only. "
-        "Both rates are over delivered hints, measured by the same checks for every system. Leaks are "
-        "checked against the stored ground truth. B1, B2 and B3 are measured but never filtered. A hint "
-        "with no computed values counts as verified, so the last column shows how many passed with at least "
-        "one certified claim, i.e. checked mathematics rather than a vacuous pass.",
-    ]))
-    rows = t6_ablations(graded, ["OURS"] + ABLATIONS)
-    t6_notes = ["A blank row means that configuration has not been run on this split.",
-                "A1 is identical to B4 and A3 to OURS on D1 by construction: the Diagnostic Agent needs student "
-                "work, which only D3 has."]
-    tables.append(("T6", "Ablations (D1)", rows, t6_notes))
+    # Not in this paper (decision of 2026-11-08): T4 and T4b need D3, T5 needs hints, T6 needs ablations.
     tables.append(("T7", "Mean cost per problem", t7_cost(graded, base), [
         "Calls, tokens and latency are those of the original API call, so cached reruns report the same cost. "
         "Seconds are the latency of the successful API call plus local compute. Pacing and rate-limit waits are excluded.",
-        "Seconds come only from Groq synchronous runs; batch runs record no latency.",
+        "Batch runs record no latency.",
         "Output tokens are all tokens except the prompt, so they include thinking.",
     ]))
     frame, notes = t7b_truncation(graded, base)
     tables.append(("T7b", "Truncation rate by system and size", frame, notes))
-    rq2 = rq2_frames(d3, d3_data.gold_labels(d3_frame)[0]) if d3_frame is not None and d3 else {}
-    frame, notes = t8_tests(graded, rq2)
+    frame, notes = t8_tests(graded)
     tables.append(("T8", "McNemar tests with Holm correction (primary family)", frame, notes))
     return tables
 

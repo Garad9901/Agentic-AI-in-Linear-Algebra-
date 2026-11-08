@@ -4,6 +4,19 @@ Python 3.10.9, CPU only. The plan is [PREREGISTRATION.md](PREREGISTRATION.md), a
 
 No number in any table comes from anywhere but a real model reply, a dataset file or an exact computation. There is no mock model. A cell that cannot be computed stays blank, with the reason under the table.
 
+## Design for this paper
+
+The reduced design decided on 2026-11-08 (see [DEVIATIONS.md](DEVIATIONS.md)):
+
+- **Systems:** OURS, B1, B2 and B3. These are the RQ1 primary comparisons.
+- **Data:** the D1 test split, 216 problems, with dev for tuning.
+- **Runs:** run 1 only, so there is no run-to-run variance. The registered sample-size reasoning assumed 3 runs, so the paper reports this as a limitation.
+- **Hints:** none. No system makes hints on D1 or D2, and the B1 and B3 prompts no longer ask for them.
+- **Statistics:** RQ4 coverage comes from the same OURS outputs. The Holm family is the 3 RQ1 comparisons.
+- **Not run:** runs 2 and 3, LinAlg-Bench (D2), B4, the ablations and hints. RQ2 and RQ3 need student data (D3) and are deferred to a later paper.
+
+Provider refusals and truncated responses are logged in `logs/refusals.jsonl` and `logs/truncations.jsonl`. They are set aside and counted, never scored as wrong answers or abstentions.
+
 ## Setup (PowerShell)
 
 ```powershell
@@ -21,12 +34,14 @@ python -m pytest -q
 ## Dev split
 
 ```powershell
-python run.py --provider groq --system OURS --dataset d1 --split dev --run 1 --limit 20 --workers 4
+python tools/run_until_done.py --provider cerebras --dataset d1 --split dev --systems B1,B2,B3,OURS --expected 54
 python score.py --split dev
-python scripts/cost_probe.py
+python tools/claim_audit.py sample --split dev
 ```
 
-All reported results come from one model: Groq `openai/gpt-oss-120b` (decision of 2026-11-07). The Gemini provider and Batch mode stay in the repository but produce no reported results, and `score.py` only scores Groq rows. For reference, Batch mode writes the same rows, with no latency, and resumes when the same command is rerun:
+`run_until_done.py` calls `run.py` with `--wait-daily`, so a daily token cap pauses the run until it resets. After a crash, sleep or network loss, the next attempt resumes from the cache, so finished calls cost nothing. It keeps going until no row is a provider refusal.
+
+Only Cerebras results are scored. The Groq probe is kept in `results/archive/groq_probe/` as dev-only cost evidence (`python scripts/cost_probe.py`). The Gemini provider and Batch mode stay in the repository but produce no reported results. For reference, Batch mode writes the same rows, with no latency, and resumes when the same command is rerun:
 
 ```powershell
 python run.py --provider gemini --batch --system OURS --dataset d1 --split dev --run 1

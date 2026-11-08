@@ -2,8 +2,8 @@
 
   python scripts/cost_probe.py
 
-Reads results/<system>_d1_dev_run1__groq__<model>.csv and writes results/cost_probe_groq.md.
-All reported results come from this one model (decision of 2026-11-07). Means are taken
+Reads the archived Groq probe in results/archive/groq_probe/ and writes its report there.
+These rows are dev-only cost evidence, not reported results (decision of 2026-11-08). Means are taken
 over (topic, size) cells, so a cell holding two probe problems does not count twice.
 Projections use live tokens: what the API bills, after identical prompts in a run are
 served from the cache.
@@ -23,6 +23,7 @@ from systems import SYSTEMS  # noqa: E402
 
 PROVIDER = "groq"
 RUN = 1
+ARCHIVE = RESULTS / "archive" / "groq_probe"
 PROBE_PROBLEMS = 20
 D1_PROBLEMS = 270
 D2_PROBLEMS = 210
@@ -131,7 +132,7 @@ def main() -> None:
     model = model_for(PROVIDER)
     frames = {}
     for system in SYSTEMS:
-        path = result_path(system, "d1", "dev", RUN, PROVIDER, model)
+        path = ARCHIVE / result_path(system, "d1", "dev", RUN, PROVIDER, model).name
         if path.exists():
             frames[system] = pd.read_csv(path, keep_default_na=False)
     missing = [s for s in SYSTEMS if s not in frames]
@@ -149,7 +150,7 @@ def main() -> None:
     else:
         lines += ["## Projection for the full run", "", f"Blank: it needs all 5 systems on all {PROBE_PROBLEMS} "
                   "problems, and this probe did not finish. Projecting from what did finish would not be a measurement."]
-    out = RESULTS / f"cost_probe_{PROVIDER}.md"
+    out = ARCHIVE / f"cost_probe_{PROVIDER}.md"
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
     print(out.read_text(encoding="utf-8"))
 

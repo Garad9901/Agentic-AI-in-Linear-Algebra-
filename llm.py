@@ -38,13 +38,17 @@ PROVIDERS = {
     "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY", 60),
     "openrouter": ("https://openrouter.ai/api/v1", "OPENROUTER_API_KEY", 15),
     "mistral": ("https://api.mistral.ai/v1", "MISTRAL_API_KEY", 50),
-    "cerebras": ("https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", 25),
+    "cerebras": ("https://api.cerebras.ai/v1", "CEREBRAS_API_KEY", 5),
     "together": ("https://api.together.xyz/v1", "TOGETHER_API_KEY", 50),
 }
 RETRY_STATUS = (429, 500, 502, 503, 504)
 DAILY_QUOTA = ("PerDay", "per day")  # e.g. GenerateRequestsPerDayPerProjectPerModel, "tokens per day (TPD)"
 _ORG_ID = re.compile(r"org_[a-z0-9]+")
 MAX_OUTPUT_TOKENS = 65536  # the most either model allows, so 5x5 problems are not cut off
+# Cerebras free tier: 32K output and 65K context for gpt-oss-120b. A 5x5 reply needs about 18K.
+PROVIDER_MAX_OUTPUT = {"cerebras": 32768}
+REFUSALS_PATH = ROOT / "logs" / "refusals.jsonl"
+TRUNCATIONS_PATH = ROOT / "logs" / "truncations.jsonl"
 CHARS_PER_TOKEN = 1.8  # measured from HTTP 413 sizes: prompts are mostly digits and brackets
 TPM_MARGIN = 100
 REPLACE_ATTEMPTS = 8
@@ -142,13 +146,14 @@ def _settings() -> dict:
         "base": base,
         "key_env": key_env,
         "rpm": float(os.environ.get("LLM_RPM") or rpm),
-        "max_tokens": int(os.environ.get("LLM_MAX_TOKENS") or MAX_OUTPUT_TOKENS),
+        "max_tokens": int(os.environ.get("LLM_MAX_TOKENS") or PROVIDER_MAX_OUTPUT.get(provider, MAX_OUTPUT_TOKENS)),
         "max_retries": int(os.environ.get("LLM_MAX_RETRIES") or 12),
         "max_wait": float(os.environ.get("LLM_MAX_WAIT") or 180),
         "json_mode": os.environ.get("LLM_JSON_MODE", "0") == "1",
         "tpm": int(os.environ.get("LLM_TPM") or 0),
         "temperature": float(os.environ.get("LLM_TEMPERATURE") or 0.7),
         "timeout": float(os.environ.get("LLM_TIMEOUT") or 900),
+        "wait_daily": os.environ.get("LLM_WAIT_DAILY") == "1",
     }
 
 
@@ -232,6 +237,61 @@ def _backoff(attempt: int, retry_after: str | None, max_wait: float) -> float:
     return wait
 
 
+_WAIT_IN = re.compile(r"(?:try again|retry) in ((?:\d+h)?(?:\d+m(?!s))?(?:[\d.]+(?:ms|s))?)", re.I)
+
+
+def parse_wait(text: str) -> float | None:
+    """Seconds from "Please try again in 1h2m3.5s" (Groq) or "Please retry in 2h39m41s" (Gemini)."""
+    m = _WAIT_IN.search(text or "")
+    if not m or not m.group(1):
+        return None
+    total = 0.0
+    for amount, unit in re.findall(r"([\d.]+)(h|ms|m|s)", m.group(1)):
+        total += float(amount) * {"h": 3600, "m": 60, "s": 1, "ms": 0.001}[unit]
+    return total
+
+
+def _seconds(value) -> float | None:
+    """A reset header: plain seconds (Cerebras) or a duration like 1m26.4s (Groq)."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        parts = re.findall(r"([\d.]+)(h|ms|m|s)", str(value))
+        return sum(float(a) * {"h": 3600, "m": 60, "s": 1, "ms": 0.001}[u] for a, u in parts) if parts else None
+
+
+def daily_reset(headers) -> float | None:
+    """Seconds until a per-day allowance resets, if a header says it is used up."""
+    for name, value in (headers or {}).items():
+        lower = name.lower()
+        if "remaining" in lower and "day" in lower and str(value).strip() in ("0", "0.0"):
+            for reset_name, reset_value in headers.items():
+                if reset_name.lower() == lower.replace("remaining", "reset"):
+                    return _seconds(reset_value)
+            return None
+    return None
+
+
+def _is_daily(body_text: str, headers=None) -> bool:
+    return any(marker in body_text for marker in DAILY_QUOTA) or daily_reset(headers) is not None
+
+
+def _is_minute_deficit(code: int, body_text: str) -> bool:
+    """Groq lets one long reply overdraw tokens per minute, then answers 413 until the
+    allowance refills. That is a wait, not a request that can never fit."""
+    return code in (413, 429) and "per minute" in body_text.lower()
+
+
+def _log_event(path: Path, record: dict) -> None:
+    """Refusals and truncations get their own logs: neither is ever scored as an answer."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamped = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"), **record}
+    with _log_lock, open(path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(stamped) + "\n")
+
+
 def _request(cfg: dict, prompt: str) -> dict:
     body = {
         "model": cfg["model"],
@@ -258,8 +318,20 @@ def _request(cfg: dict, prompt: str) -> dict:
         except urllib.error.HTTPError as e:
             body_text = e.read().decode(errors="replace")
             msg = _ORG_ID.sub("org_***", body_text[:300])  # results are published
-            if e.code == 429 and any(marker in body_text for marker in DAILY_QUOTA):
+            _log_event(REFUSALS_PATH, {"provider": cfg["provider"], "model": cfg["model"], "code": e.code,
+                                       "attempt": attempt, "message": msg})
+            if e.code == 429 and _is_daily(body_text, e.headers):
+                wait = parse_wait(body_text) or daily_reset(e.headers)
+                if cfg["wait_daily"] and wait is not None:
+                    print(f"daily quota reached; waiting {wait / 3600:.1f} h for it to reset", flush=True)
+                    time.sleep(wait + 5)
+                    continue
                 raise LLMError(f"daily quota exhausted for {cfg['model']}: retrying today cannot help") from None
+            if _is_minute_deficit(e.code, body_text) and attempt <= cfg["max_retries"]:
+                rate_limits += 1
+                wait = parse_wait(body_text) or float(e.headers.get("Retry-After") or 0) or 60.0
+                time.sleep(min(wait + 1, cfg["max_wait"]))
+                continue
             if e.code in RETRY_STATUS and attempt <= cfg["max_retries"]:
                 rate_limits += e.code == 429
                 time.sleep(_backoff(attempt, e.headers.get("Retry-After"), cfg["max_wait"]))
@@ -267,6 +339,8 @@ def _request(cfg: dict, prompt: str) -> dict:
             raise LLMError(f"HTTP {e.code}: {msg}") from None
         except (urllib.error.URLError, TimeoutError, ConnectionError, http.client.HTTPException) as e:
             timeouts += isinstance(e, TimeoutError)
+            _log_event(REFUSALS_PATH, {"provider": cfg["provider"], "model": cfg["model"], "code": "network",
+                                       "attempt": attempt, "message": str(e)[:200]})
             if attempt <= cfg["max_retries"]:
                 time.sleep(_backoff(attempt, None, cfg["max_wait"]))
                 continue
@@ -335,6 +409,9 @@ def call_llm(role: str, prompt: str) -> str:
         if not entry["text"].strip() and entry["finish_reason"] != "length":
             raise LLMError(f"empty reply (finish_reason={entry['finish_reason']})")
         _write_cache(key, entry)
+        if entry["finish_reason"] == "length":
+            _log_event(TRUNCATIONS_PATH, {"provider": cfg["provider"], "model": cfg["model"], "role": role,
+                                          "run": current_run(), "total_tokens": entry.get("total_tokens")})
     record = _record(role, cfg, entry, cached, request_s)
     if collector is None:  # a batch round replays calls that store() has logged already
         _log_file(record)

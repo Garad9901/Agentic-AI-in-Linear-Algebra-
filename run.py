@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import json
+import os
 import platform
 import sys
 import time
@@ -39,6 +40,7 @@ MODELS = ROOT / "config" / "models.yaml"
 RUNS = [1, 2, 3]
 ES_CONTINUOUS, ES_SYSTEM_REQUIRED = 0x80000000, 0x00000001
 MAX_CONSECUTIVE_API_ERRORS = 3
+NOT_ANSWERED = ("parse_error", "abstained", "answer_withheld")
 HINT_ROLES = ("hint", "hint_verifier")  # separate agent calls; B1 and B3 write hints inside their one reply
 
 
@@ -139,6 +141,8 @@ def run_one(system: str, problem: dict, taxonomy: list, run: int, mode: str = "s
         except BatchPending:
             outcome = {"status": "pending"}
     usage = _usage(calls)
+    if outcome["status"] in NOT_ANSWERED and usage["truncated_calls"]:
+        outcome["status"] = "truncated"  # a cut-off reply, not a wrong answer or an abstention
     local = max(0.0, time.time() - t0 - sum(c.get("request_s") or 0 for c in calls))
     return {
         "problem_id": problem["id"],
@@ -186,7 +190,7 @@ def main() -> None:
     sys.stdout.reconfigure(errors="replace")
     keep_awake()
     ap = argparse.ArgumentParser(description="Run a system on a dataset split.")
-    ap.add_argument("--provider", required=True, choices=["groq", "gemini"])
+    ap.add_argument("--provider", required=True, choices=["groq", "gemini", "cerebras"])
     ap.add_argument("--batch", action="store_true", help="Gemini Batch API; rerun the command to resume")
     ap.add_argument("--system", required=True, choices=SYSTEMS + ABLATIONS + STUDENT_ONLY)
     ap.add_argument("--dataset", required=True, choices=["d1", "d2", "d3"])
@@ -194,6 +198,8 @@ def main() -> None:
     ap.add_argument("--run", type=int, choices=RUNS, default=1, help="seed index, prereg-v1 s6")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--workers", type=int, default=1, help="problems at once; requests stay within LLM_RPM")
+    ap.add_argument("--wait-daily", action="store_true",
+                    help="when a daily quota is reached, wait for it to reset and carry on instead of stopping")
     args = ap.parse_args()
 
     if args.system in STUDENT_ONLY and args.dataset != "d3":
@@ -211,6 +217,8 @@ def main() -> None:
     taxonomy = load_taxonomy()
     model = model_for(args.provider)
     configure(args.provider, model)
+    if args.wait_daily:
+        os.environ["LLM_WAIT_DAILY"] = "1"
     path = result_path(args.system, args.dataset, args.split, args.run, args.provider, model)
     RESULTS.mkdir(exist_ok=True)
     if args.batch:

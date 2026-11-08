@@ -16,16 +16,15 @@ OURS repairs, then withholds only claims still refuted and delivers the rest, wi
 "unverified" flag on claims it cannot certify (decision of 2026-11-07). Its result
 keeps the whole final version, with step_flags and answer_flag saying what was withheld.
 
-D1 and D2 have no student work, so the Diagnostic Agent cannot run on them and hints
-are written for a student who is stuck and has not started. Hints on D1 are exploratory
-and made in run 1 only (decision of 2026-11-07). A1 is the same configuration as B4,
-and A3 the same as OURS on D1 and D2; each pair is reported as one result.
+D1 and D2 have no student work, so the Diagnostic Agent cannot run on them. This paper
+makes no hints on them (decision of 2026-11-08): hints and RQ3 wait for student data (D3).
+A1 is the same configuration as B4, and A3 the same as OURS on D1 and D2; each pair is
+reported as one result.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
 
-import llm
 from agents import diagnostic, hint, llm_verifier, solver, verification
 from agents import prompts as P
 from agents.base import ask_json
@@ -35,7 +34,6 @@ from verifier.steps import normalise_step
 SYSTEMS = ["B1", "B2", "B3", "B4", "OURS"]
 ABLATIONS = ["A1", "A2", "A3", "A4"]
 STUDENT_ONLY = ["DET"]
-HINT_RUNS_D1 = {1}
 
 
 @dataclass(frozen=True)
@@ -53,10 +51,8 @@ _ABLATION_OPTIONS = {
 
 
 def hints_wanted(problem: dict) -> bool:
-    """Hints on D1 are made in run 1 only. Student work always gets hints."""
-    if problem.get("dataset") == "d1":
-        return llm.current_run() in HINT_RUNS_D1
-    return True
+    """Hints only for student work. D1 and D2 get none in this paper."""
+    return bool(problem.get("student_steps"))
 
 
 def _outcome(status, solution=None, hints=None, **extra) -> dict:
@@ -103,7 +99,8 @@ def _single(problem: dict, with_self_check: bool) -> dict:
     step = reply.get("first_wrong_step")
     if not isinstance(step, int) or isinstance(step, bool):
         step = None
-    return _outcome("answered", reply, _single_hints(reply), pred_first_wrong_step=step,
+    hints = _single_hints(reply) if hints_wanted(problem) else []
+    return _outcome("answered", reply, hints, pred_first_wrong_step=step,
                     pred_misconception=reply.get("misconception"))
 
 

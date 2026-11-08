@@ -440,10 +440,28 @@ def single_reply(answer=-2):
                        "hints": [{"level": i, "text": "Think.", "claims": []} for i in (1, 2, 3)]})
 
 
-def test_b1_is_one_call(monkeypatch):
-    roles = script(monkeypatch, [single_reply()])
+@pytest.fixture
+def hints_on(monkeypatch):
+    """Hint flow still matters for D3, so its tests switch hints on for a D1-style problem."""
+    monkeypatch.setattr(systems, "hints_wanted", lambda problem: True)
+
+
+def test_b1_is_one_call_and_makes_no_hints_on_d1(monkeypatch):
+    prompts = []
+
+    def fake(role, prompt):
+        prompts.append(prompt)
+        return single_reply()
+
+    monkeypatch.setattr(llm, "call_llm", fake)
     out = run_system("B1", P, [])
-    assert roles == ["single"] and out["answer"] == {"determinant": -2} and len(out["hints"]) == 3
+    assert len(prompts) == 1 and out["answer"] == {"determinant": -2} and out["hints"] == []
+    assert "hint" not in prompts[0].lower()  # the prompt no longer asks for hints
+
+
+def test_b1_keeps_hints_for_student_work(monkeypatch):
+    script(monkeypatch, [single_reply()])
+    assert len(run_system("B1", STUDENT, [])["hints"]) == 3
 
 
 def test_b3_adds_a_self_check_that_can_change_the_answer(monkeypatch):
@@ -458,11 +476,16 @@ JUDGE_NO = '{"verdict": "incorrect", "reason": "recheck the sign"}'
 
 def test_b2_llm_verifier_can_approve_a_wrong_answer(monkeypatch):
     # The point of B2: an LLM judge is no independent check, so this reaches the student.
-    roles = script(monkeypatch, [BAD, JUDGE_OK, NO_LEAK, JUDGE_OK, NO_LEAK, JUDGE_OK, NO_LEAK, JUDGE_OK])
+    roles = script(monkeypatch, [BAD, JUDGE_OK])
     out = run_system("B2", P, [])
     assert out["status"] == "answered" and out["answer"] == {"determinant": 10}
-    assert roles[:2] == ["solver", "llm_verifier"] and roles.count("llm_verifier") == 1
-    assert roles.count("hint_verifier") == 3  # judging hints is its own role, so its cost can be separated
+    assert roles == ["solver", "llm_verifier"]
+
+
+def test_b2_hint_judging_is_its_own_role(monkeypatch, hints_on):
+    roles = script(monkeypatch, [GOOD, JUDGE_OK, NO_LEAK, JUDGE_OK, NO_LEAK, JUDGE_OK, NO_LEAK, JUDGE_OK])
+    run_system("B2", P, [])
+    assert roles.count("llm_verifier") == 1 and roles.count("hint_verifier") == 3
 
 
 def test_b2_rejection_retries_then_abstains(monkeypatch):
@@ -479,7 +502,7 @@ def test_b2_rejection_retries_then_abstains(monkeypatch):
     assert "recheck the sign" in prompts[2]
 
 
-def test_b2_regenerates_a_rejected_hint(monkeypatch):
+def test_b2_regenerates_a_rejected_hint(monkeypatch, hints_on):
     script(monkeypatch, [GOOD, JUDGE_OK, NO_LEAK, JUDGE_NO, NO_LEAK, JUDGE_OK, NO_LEAK, JUDGE_OK, NO_LEAK, JUDGE_OK])
     out = run_system("B2", P, [])
     assert out["hints"][0]["regenerations"] == 1 and len(out["hints"]) == 3
@@ -488,18 +511,18 @@ def test_b2_regenerates_a_rejected_hint(monkeypatch):
 def test_b2_never_uses_the_certificates(monkeypatch):
     monkeypatch.setattr(verification, "verify", lambda *a: pytest.fail("B2 must not call the SymPy verifier"))
     monkeypatch.setattr(verification, "check_steps", lambda *a: pytest.fail("B2 must not call the step checker"))
-    script(monkeypatch, [GOOD, JUDGE_OK, NO_LEAK, JUDGE_OK, NO_LEAK, JUDGE_OK, NO_LEAK, JUDGE_OK])
+    script(monkeypatch, [GOOD, JUDGE_OK])
     assert run_system("B2", P, [])["status"] == "answered"
 
 
-def test_b4_never_filters(monkeypatch):
+def test_b4_never_filters(monkeypatch, hints_on):
     roles = script(monkeypatch, [BAD, LEAK, LEAK, LEAK])
     out = run_system("B4", P, [])
     assert roles == ["solver", "hint", "hint", "hint"]
     assert out["answer"] == {"determinant": 10} and out["hints"][0]["text"] == "The determinant is -2."
 
 
-def test_ours_withholds_a_refuted_answer_and_still_helps(monkeypatch):
+def test_ours_withholds_a_refuted_answer_and_still_helps(monkeypatch, hints_on):
     roles = script(monkeypatch, [BAD, BAD, BAD, LEAK, NO_LEAK, NO_LEAK, NO_LEAK])
     out = run_system("OURS", P, [])
     assert out["status"] == "answer_withheld" and out["answer_flag"] == "withheld"
@@ -518,9 +541,14 @@ def test_truncated_replies_count_as_no_answer_for_every_system(monkeypatch):
 
 
 def test_ours_full_path(monkeypatch):
-    roles = script(monkeypatch, [GOOD, NO_LEAK, NO_LEAK, NO_LEAK])
+    roles = script(monkeypatch, [GOOD])
     out = run_system("OURS", P, [])
-    assert out["status"] == "answered" and roles == ["solver", "hint", "hint", "hint"]
+    assert out["status"] == "answered" and roles == ["solver"] and out["hints"] == []
+
+
+def test_ours_with_hints(monkeypatch, hints_on):
+    roles = script(monkeypatch, [GOOD, NO_LEAK, NO_LEAK, NO_LEAK])
+    assert run_system("OURS", P, [])["status"] == "answered" and roles == ["solver", "hint", "hint", "hint"]
 
 
 def test_a1_removes_verification(monkeypatch):
@@ -542,16 +570,13 @@ def test_a2_verifies_the_final_answer_only(monkeypatch):
 D1_P = {**P, "id": "D1-x", "dataset": "d1"}
 
 
-def test_d1_hints_are_made_in_run_1_only(monkeypatch):
-    for system in ("OURS", "B4", "B2"):
-        replies = [GOOD] + ([JUDGE_OK] if system == "B2" else [])
-        script(monkeypatch, replies)
-        with llm.use_run(2):
-            out = run_system(system, D1_P, [])
-        assert out["hints"] == [], system
-    script(monkeypatch, [GOOD, NO_LEAK, NO_LEAK, NO_LEAK])
-    with llm.use_run(1):
-        assert len(run_system("OURS", D1_P, [])["hints"]) == 3
+def test_no_system_makes_hints_on_d1_or_d2_in_any_run(monkeypatch):
+    for problem in (D1_P, {**P, "id": "D2-x", "dataset": "d2"}):
+        for system in ("OURS", "B4", "B2", "B1", "B3"):
+            replies = {"B2": [GOOD, JUDGE_OK], "B1": [single_reply()], "B3": [single_reply(), single_reply()]}
+            script(monkeypatch, replies.get(system, [GOOD]))
+            with llm.use_run(1):
+                assert run_system(system, problem, [])["hints"] == [], (system, problem["id"])
 
 
 def test_student_work_gets_hints_in_every_run(monkeypatch):
@@ -560,7 +585,7 @@ def test_student_work_gets_hints_in_every_run(monkeypatch):
         assert len(run_system("OURS", STUDENT, ["SIGN"])["hints"]) == 3
 
 
-def test_a4_gives_a_single_hint(monkeypatch):
+def test_a4_gives_a_single_hint(monkeypatch, hints_on):
     roles = script(monkeypatch, [GOOD, NO_LEAK])
     out = run_system("A4", P, [])
     assert len(out["hints"]) == 1 and roles == ["solver", "hint"]
@@ -785,10 +810,10 @@ def test_gold_needs_agreement_or_a_gold_row():
 def test_tables_leave_d3_blank_without_data(tmp_path, monkeypatch):
     monkeypatch.setattr(d3_data, "read_rows", lambda: (_ for _ in ()).throw(d3_data.D3Unavailable("no data yet")))
     tables = {t[0]: t for t in score.build("dev", None, tmp_path, bootstrap=100)}
-    t4 = tables["T4"][2]
-    assert t4["first_wrong_step_accuracy"].eq("").all()
-    assert any("no data yet" in n for n in tables["T4"][3])
-    assert tables["T4b"][2]["kappa"].eq("").all()
+    # D3, hints and ablations are not in this paper, so their tables are not built.
+    assert not {"T4", "T4b", "T5", "T6"} & set(tables)
+    assert {"T1", "T2", "T2b", "T3", "T3b", "T3d", "T7", "T7b", "T8"} <= set(tables)
+    assert any("no data yet" in n for n in tables["T1"][3])
 
 
 def test_deviations_state_they_precede_the_test_split():
